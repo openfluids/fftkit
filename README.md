@@ -15,12 +15,12 @@ spells the same transform differently. `fftkit` puts a single callable in front
 of eight of them, reports which ones are installed, and measures which one is
 fastest for your array sizes.
 
-Extracted from [`modalpy`](https://github.com/openfluids/modalpy).
+Extracted from [`openmodalpy`](https://github.com/openfluids/openmodalpy).
 
 ## Status
 
-Under construction — the packaging scaffold is in place; the library, tests, and
-benchmarks are landing next. See `CHANGELOG.md`.
+Released — `0.1.0` is on PyPI. The backend dispatch layer, the correctness
+invariants, and the benchmark suite are all in place. See `CHANGELOG.md`.
 
 ## Install
 
