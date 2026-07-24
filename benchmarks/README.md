@@ -41,9 +41,11 @@ Options:
 **Notes**: Machine-dependent. Backends not installed on your system are skipped gracefully.
 
 ### study_interpolation.py
-**What it measures**: Which interpolation method best preserves spectrum when resampling non-uniform data
+**What it measures**: Which interpolation method distorts the spectrum least when a series is resampled onto a coarser uniform grid.
 
-Resampling to uniform time grid is essential because FFT requires constant sampling intervals, but many simulations (adaptive, event-driven) produce variable dt data.
+The motivation is that FFT needs constant sampling intervals while many simulations (adaptive, event-driven) write variable-dt output. **The current script does not yet test that case**: it resamples a fine *uniform* grid onto a coarse *uniform* one, so the results describe downsampling rather than non-uniform input. `variable_time_steps()` exists to close that gap but is not wired in. The same gap was present in the script this was ported from.
+
+Read the results with care. The resampling is 116x decimation with no anti-alias filter, and that error dominates: on a noiseless signal, nearest / linear / cubic agree to within 0.1%. The percentage table exaggerates differences that are small in absolute terms — check the raw MSE in the JSON. Pass `--seed` (default 0) for reproducibility; close-running methods swap places between seeds.
 
 **Outputs**:
 - `study_interpolation_noise_*.png` - Interpolation method comparison plots

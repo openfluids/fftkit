@@ -18,9 +18,21 @@ the script this was ported from, where the call was commented out. Until that is
 connected, treat these rankings as evidence about downsampling, not about the
 non-uniform-dt case that motivates the study.
 
-Two further caveats when reading the output:
+Caveats when reading the output, all measured rather than assumed:
+
+- The resampling here is 116x decimation (2313 Hz -> 20 Hz) with NO anti-alias
+  filter, so everything above the new 10 Hz Nyquist folds back into the band.
+  That aliasing error is large and largely method-independent: on a NOISELESS
+  signal, nearest / linear / cubic land within 0.1% of each other (2.643e-4 vs
+  2.646e-4). The method you pick is a small perturbation on a much bigger error
+  that none of them address. If you care about the spectrum after heavy
+  downsampling, low-pass filtering first (scipy.signal.decimate) matters more
+  than the choice of interpolant.
+- Because of that, the "percent difference from best" table amplifies small
+  absolute differences into large-looking percentages. Read the raw MSE in the
+  JSON output alongside it.
 - The score is a single realization per noise level. Methods that finish close
-  together swap order between seeds; only large gaps are meaningful.
+  together swap order between seeds; only large gaps mean anything.
 - MSE is computed across the whole spectrum, so the broadband noise floor
   contributes alongside the signal peaks.
 """
