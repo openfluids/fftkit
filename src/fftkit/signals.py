@@ -2,7 +2,7 @@
 
 def generate_complex_signal(t, f1, f2, num_harmonics_f1=5, num_harmonics_f2=3,
                             harmonic_decay_f1=0.5, harmonic_decay_f2=0.7,
-                            f1_amplitude=1.0, f2_amplitude=0.3, noise_level=0.15):
+                            f1_amplitude=1.0, f2_amplitude=0.3, noise_level=0.15, *, seed=None):
     """
     Generate a quasiperiodic signal with two uncorrelated frequencies and their harmonics.
 
@@ -27,6 +27,10 @@ def generate_complex_signal(t, f1, f2, num_harmonics_f1=5, num_harmonics_f2=3,
         Amplitude of the secondary frequency component (default is 0.3)
     noise_level : float, optional
         Level of random noise to add (default is 0.05)
+    seed : int, optional
+        Random seed for reproducible noise generation. When None, uses global numpy.random state.
+        When specified, creates a local random generator for noise only without affecting
+        the global random state (default is None).
 
     Returns:
     array-like
@@ -46,7 +50,11 @@ def generate_complex_signal(t, f1, f2, num_harmonics_f1=5, num_harmonics_f2=3,
         signal += harmonic_amplitude * np.sin(2 * np.pi * i * f2 * t)
 
     # Add random noise
-    noise = noise_level * np.random.randn(len(t))
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+        noise = noise_level * rng.standard_normal(len(t))
+    else:
+        noise = noise_level * np.random.randn(len(t))
     final_signal = signal + noise
     final_signal -= np.mean(final_signal)  # Normalize the signal
     final_signal /= np.std(final_signal)
