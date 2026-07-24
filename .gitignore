@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Linting
+.ruff_cache/
+.mypy_cache/
+
+# Benchmark artifacts (regenerate with benchmarks/*.py --out)
+benchmarks/out/
+*.png
+*.pdf
+!docs/**/*.png
+
+# Data
+*.npz
+*.mat
+*.h5
+*.hdf5
+
+# macOS
+.DS_Store
