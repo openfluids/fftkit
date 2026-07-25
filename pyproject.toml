@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fftkit"
-version = "0.2.0"
+version = "0.3.0"
 description = "One FFT API over many backends: scipy, numpy, Intel MKL, CuPy, PyTorch, TensorFlow, pyFFTW, Accelerate"
 readme = "README.md"
 license = "Apache-2.0"

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-25
+
+### Fixed
+- The `tensorflow` backend silently discarded `n=` and `s=`.
+  `tf.signal.fft`/`ifft` take no `fft_length`, and the adapter's fallback
+  branch dropped the argument instead of applying it, so
+  `fftkit.fft(x, n=32, backend="tensorflow")` returned an array of the input's
+  length with no error or warning. `fft2`/`ifft2` had the same defect for `s=`
+  (their `fft_length=s` branch was dead code, since the registry never maps
+  them onto `rfft2d`/`irfft2d`). Both now truncate or zero-pad the input to the
+  requested length, which is what `n=`/`s=` mean for a forward transform.
+  Present in `0.2.0`; a mismatched `s=` length now raises `ValueError` rather
+  than being partially applied.
+
 ### Fixed
 - `register_mkl_scipy_backend()` returned a bare `False` for two unrelated
   causes with different fixes: `mkl_fft` missing entirely, versus `mkl_fft`
@@ -158,6 +172,7 @@ First release.
 - Benchmark scripts under `benchmarks/` for backend timing, PSD method
   comparison and interpolation studies.
 
-[Unreleased]: https://github.com/openfluids/fftkit/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/openfluids/fftkit/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/openfluids/fftkit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/openfluids/fftkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/openfluids/fftkit/releases/tag/v0.1.0

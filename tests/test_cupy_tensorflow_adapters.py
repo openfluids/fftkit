@@ -199,13 +199,47 @@ class TestTensorflowNGuard:
         _call("fft", np.zeros(16))
         assert tf_stub.signal.calls[-1]["fft_length"] is None
 
-    def test_n_ignored_for_transform_without_fft_length_kw(self, tf_stub):
-        """'fft'/'ifft' (non-real) tf.signal ops take no fft_length kwarg at
-        all -- the adapter must not pass n through to them as fft_length,
-        which real tf.signal.fft() would reject with a TypeError.
+    @pytest.mark.parametrize("transform", ["fft", "ifft"])
+    @pytest.mark.parametrize("n,in_len", [(8, 16), (32, 16), (16, 16)])
+    def test_n_is_applied_by_resizing_for_complex_transforms(
+        self, tf_stub, transform, n, in_len
+    ):
+        """tf.signal.fft/ifft take no fft_length, so n= must be applied by
+        truncating or zero-padding the input before the transform.
+
+        This previously asserted the opposite. The old test was named
+        `test_n_ignored_for_transform_without_fft_length_kw` and checked that
+        fft_length stayed None, which is true but not the whole contract: the
+        adapter also silently discarded n, so fftkit.fft(x, n=32,
+        backend='tensorflow') returned a length-16 array. A test that pins a
+        silent wrong answer as correct is worse than no test, because the
+        obvious way to make it pass again is to reintroduce the bug.
         """
-        _call("fft", np.zeros(16), n=8)
-        assert tf_stub.signal.calls[-1]["fft_length"] is None
+        _call(transform, np.zeros(in_len), n=n)
+        call = tf_stub.signal.calls[-1]
+        # fft_length is still not passed -- real tf.signal.fft would reject it.
+        assert call["fft_length"] is None
+        # But the input reaching tf.signal must have been resized to n.
+        assert call["shape"][-1] == n, (
+            f"n={n} on a length-{in_len} input must reach tf.signal as length "
+            f"{n}, got {call['shape'][-1]}"
+        )
+
+    def test_s_is_applied_by_resizing_for_2d(self, tf_stub):
+        """fft2d/ifft2d take no fft_length either, and s= was silently dropped
+        the same way. The old `fft_length=s` branch was dead code: the registry
+        only maps fft2/ifft2 onto fft2d/ifft2d, never onto rfft2d/irfft2d."""
+        _call("fft2", np.zeros((10, 12)), s=(4, 6))
+        call = tf_stub.signal.calls[-1]
+        assert call["shape"][-2:] == (4, 6), (
+            f"s=(4, 6) must resize the transformed axes, got {call['shape'][-2:]}"
+        )
+
+    def test_mismatched_s_length_raises(self, tf_stub):
+        """s= with the wrong number of entries is a caller error, not something
+        to silently partially apply."""
+        with pytest.raises(ValueError, match="s="):
+            _call("fft2", np.zeros((10, 12)), s=(4,), axes=(0, 1))
 
 
 class TestTensorflowNormGuard:

@@ -292,6 +292,25 @@ def _torch_backend() -> Backend:
     return Backend(name, funcs)
 
 
+def _resize_axis(arr: NDArray[Any], n: int, axis: int) -> NDArray[Any]:
+    """Truncate or zero-pad ``arr`` along ``axis`` to length ``n``.
+
+    This is what numpy's and scipy's ``n=``/``s=`` mean for a forward
+    transform, and it lets backends whose native API cannot express a
+    transform length still honour the argument instead of ignoring it.
+    """
+    current = arr.shape[axis]
+    if n == current:
+        return arr
+    if n < current:
+        index: list[slice] = [slice(None)] * arr.ndim
+        index[axis] = slice(0, n)
+        return arr[tuple(index)]
+    pad = [(0, 0)] * arr.ndim
+    pad[axis] = (0, n - current)
+    return np.pad(arr, pad)
+
+
 def _tensorflow_backend() -> Backend:
     """Backend wrapping tf.signal: partial matrix, last-axis/last-2-axes only.
 
@@ -313,13 +332,25 @@ def _tensorflow_backend() -> Backend:
             import tensorflow as tf
 
             _check_norm(norm)
-            x_tf = tf.convert_to_tensor(x)
+            x_arr = np.asarray(x)
+            # tf.signal.fft/ifft take no fft_length, so n= has to be applied by
+            # resizing the input first -- which is exactly what numpy's n= means
+            # for a forward transform: truncate to n, or zero-pad up to n.
+            # Silently dropping n here (the previous behaviour) returned an array
+            # of the wrong length with no error.
+            #
+            # rfft's n= is also an INPUT length, but tf.signal.rfft accepts
+            # fft_length directly, so that path stays as-is. irfft's n= is an
+            # OUTPUT length, which only fft_length can express -- resizing its
+            # input would mean something different.
+            if n is not None and tf_name in ("fft", "ifft"):
+                x_arr = _resize_axis(x_arr, n, axis)
+            x_tf = tf.convert_to_tensor(x_arr)
             x_tf = tf.experimental.numpy.moveaxis(x_tf, axis, -1)
-            if n is not None:
-                func = getattr(tf.signal, tf_name)
-                result = func(x_tf, fft_length=[n]) if tf_name in ("rfft", "irfft") else func(x_tf)
+            func = getattr(tf.signal, tf_name)
+            if n is not None and tf_name in ("rfft", "irfft"):
+                result = func(x_tf, fft_length=[n])
             else:
-                func = getattr(tf.signal, tf_name)
                 result = func(x_tf)
             result = tf.experimental.numpy.moveaxis(result, -1, axis)
             arr: ArrayResult = result.numpy()
@@ -336,10 +367,23 @@ def _tensorflow_backend() -> Backend:
 
             _check_norm(norm)
             resolved_axes = (-2, -1) if axes is None else tuple(axes)
-            x_tf = tf.convert_to_tensor(x)
+            x_arr = np.asarray(x)
+            # Same defect as the 1-D path: fft2d/ifft2d take no fft_length, and
+            # the registry only ever maps fft2/ifft2 onto them, so the old
+            # `fft_length=s` branch was dead code and s= was silently discarded.
+            # Apply it by resizing each transformed axis, matching numpy's s=.
+            if s is not None:
+                if len(s) != len(resolved_axes):
+                    raise ValueError(
+                        f"Backend '{name}': s={s!r} has {len(s)} entries but "
+                        f"{len(resolved_axes)} axes were selected ({resolved_axes!r})."
+                    )
+                for length, ax in zip(s, resolved_axes):
+                    x_arr = _resize_axis(x_arr, length, ax)
+            x_tf = tf.convert_to_tensor(x_arr)
             x_tf = tf.experimental.numpy.moveaxis(x_tf, resolved_axes, (-2, -1))
             func = getattr(tf.signal, tf_name)
-            result = func(x_tf, fft_length=s) if tf_name in ("rfft2d", "irfft2d") else func(x_tf)
+            result = func(x_tf)
             result = tf.experimental.numpy.moveaxis(result, (-2, -1), resolved_axes)
             arr: ArrayResult = result.numpy()
             return arr
