@@ -58,6 +58,22 @@ class _Recorder:
 
     def _make(self, name):
         def fn(tensor, **kwargs):
+            # Reproduce torch's actual strictness about dim=. Real torch.fft
+            # rejects dim=None where scipy/numpy accept it as "default axes":
+            #   TypeError: fft_fft2(): argument 'dim' must be tuple of ints,
+            #              not NoneType
+            # The first version of this stub accepted any kwargs, so it passed
+            # while real torch raised -- CI with torch installed caught the bug
+            # this stub was written to cover. Mirroring the constraint here
+            # keeps that gap closed without requiring torch.
+            if "dim" in kwargs and kwargs["dim"] is None:
+                raise TypeError(
+                    f"{name}(): argument 'dim' must be tuple of ints, not NoneType"
+                )
+            if "s" in kwargs and kwargs["s"] is None:
+                raise TypeError(
+                    f"{name}(): argument 's' must be tuple of ints, not NoneType"
+                )
             self.calls.append({"transform": name, "tensor": tensor, "kwargs": kwargs})
             # Return the input unchanged; these tests are about the call, not
             # the transform. Numerical correctness of torch.fft is torch's job.
@@ -159,3 +175,34 @@ class TestNumpyRoundTrip:
             "the adapter must return numpy; leaking a tensor would break every "
             "caller that expects the same type from every backend"
         )
+
+
+class TestUnsetKeywordsAreOmitted:
+    """Regression guard for the dim=None TypeError found by CI.
+
+    scipy and numpy treat axes=None as "use the default axes"; torch.fft
+    raises. So the adapter must leave the keyword out rather than forward
+    None, letting torch apply its own default (last two axes for *2, all axes
+    for *n -- the same defaults scipy uses).
+    """
+
+    @pytest.mark.parametrize("transform", ["fft2", "ifft2", "fftn", "ifftn"])
+    def test_default_nd_call_does_not_forward_none(self, stub, transform):
+        """The plain fftkit.fft2(x, backend='torch') call, which was broken."""
+        _call(transform, np.zeros((4, 4)))
+        kwargs = stub.calls[-1]["kwargs"]
+        assert "dim" not in kwargs, "dim=None must not be forwarded to torch.fft"
+        assert "s" not in kwargs, "s=None must not be forwarded to torch.fft"
+
+    @pytest.mark.parametrize("transform", ["fft2", "ifft2", "fftn", "ifftn"])
+    def test_explicit_axes_still_forwarded(self, stub, transform):
+        """Omitting None must not also drop values the caller did supply."""
+        _call(transform, np.zeros((4, 4, 4)), s=(2, 2), axes=(0, 1))
+        kwargs = stub.calls[-1]["kwargs"]
+        assert kwargs["dim"] == (0, 1)
+        assert kwargs["s"] == (2, 2)
+
+    def test_norm_is_always_passed(self, stub):
+        """norm=None is fine for torch, so it stays unconditional."""
+        _call("fftn", np.zeros((2, 2)))
+        assert "norm" in stub.calls[-1]["kwargs"]

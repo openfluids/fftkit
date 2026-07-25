@@ -11,7 +11,7 @@ explicit axis selection, n= padding/truncation, and norm= conventions.
 import numpy as np
 import pytest
 import scipy.fft as spfft
-from conftest import all_backends_param, partial_backends_param
+from conftest import all_backends_param, assert_declared_limit, partial_backends_param
 
 import fftkit
 
@@ -68,6 +68,8 @@ class TestForward1DVsScipy:
     def test_fft_complex128(self, backend, shape_name):
         n = SHAPES_1D[shape_name]
         x = _complex_signal(n, np.complex128)
+        if assert_declared_limit(backend, lambda: fftkit.fft(x, backend=backend), length=n):
+            return
         result = fftkit.fft(x, backend=backend)
         expected = spfft.fft(x)
         assert np.allclose(result, expected, rtol=RTOL_F64, atol=ATOL_F64), (
@@ -79,6 +81,8 @@ class TestForward1DVsScipy:
     def test_fft_complex64_looser_tolerance(self, backend, shape_name):
         n = SHAPES_1D[shape_name]
         x = _complex_signal(n, np.complex64)
+        if assert_declared_limit(backend, lambda: fftkit.fft(x, backend=backend), length=n):
+            return
         result = fftkit.fft(x, backend=backend)
         expected = spfft.fft(x)
         assert np.allclose(result, expected, rtol=RTOL_F32, atol=ATOL_F32), (
@@ -200,6 +204,10 @@ class TestAxisSelection:
         # between 0.1.x and 0.2.0, so it also raises AxisDefaultWarning. Asserted
         # here rather than filtered: if the warning stops firing, the migration
         # guard has silently regressed and this is where that should surface.
+        if assert_declared_limit(
+            backend, lambda: fftkit.fft(x, axis=-1, backend=backend), length=x.shape[-1]
+        ):
+            return
         with pytest.warns(fftkit.AxisDefaultWarning):
             result = fftkit.fft(x, backend=backend)  # no axis= given
         expected = np.fft.fft(x)  # numpy default axis=-1
@@ -213,6 +221,10 @@ class TestAxisSelection:
     def test_explicit_axis_matches_scipy(self, backend, axis):
         rng = np.random.default_rng(6)
         x = rng.standard_normal((7, 11)) + 1j * rng.standard_normal((7, 11))
+        if assert_declared_limit(
+            backend, lambda: fftkit.fft(x, axis=axis, backend=backend), length=x.shape[axis]
+        ):
+            return
         result = fftkit.fft(x, axis=axis, backend=backend)
         expected = spfft.fft(x, axis=axis)
         assert np.allclose(result, expected, rtol=RTOL_F64, atol=ATOL_F64), (
@@ -237,6 +249,8 @@ class TestNParameter:
     def test_fft_n_padding_and_truncation(self, backend, n_delta):
         x = _complex_signal(64, np.complex128)
         n = 64 + n_delta
+        if assert_declared_limit(backend, lambda: fftkit.fft(x, n=n, backend=backend), n=n):
+            return
         result = fftkit.fft(x, n=n, backend=backend)
         expected = spfft.fft(x, n=n)
         assert result.shape[-1] == n
@@ -289,6 +303,10 @@ class TestNormConventions:
     def test_parseval_per_norm(self, backend, norm, scale_energy):
         x = _complex_signal(97, np.complex128)  # prime length: no radix shortcuts
         N = len(x)
+        if assert_declared_limit(
+            backend, lambda: fftkit.fft(x, norm=norm, backend=backend), length=N, norm=norm
+        ):
+            return
         X = fftkit.fft(x, norm=norm, backend=backend)
 
         E_time = np.sum(np.abs(x) ** 2)
@@ -300,10 +318,16 @@ class TestNormConventions:
             f"{backend}/{norm}: time energy {E_time:.6f} vs scaled freq energy {E_freq:.6f}"
         )
 
-    @pytest.mark.parametrize("backend", all_backends_param("fft"))
+    # Requires ifft as well as fft: parametrizing on "fft" alone ran this
+    # against accelerate, which implements no ifft.
+    @pytest.mark.parametrize("backend", all_backends_param(("fft", "ifft")))
     @pytest.mark.parametrize("norm", ["backward", "ortho", "forward"])
     def test_ifft_fft_round_trip_per_norm(self, backend, norm):
         x = _complex_signal(50, np.complex128)
+        if assert_declared_limit(
+            backend, lambda: fftkit.fft(x, norm=norm, backend=backend), length=len(x), norm=norm
+        ):
+            return
         X = fftkit.fft(x, norm=norm, backend=backend)
         recovered = fftkit.ifft(X, norm=norm, backend=backend)
         assert np.allclose(recovered, x, rtol=RTOL_F64, atol=ATOL_F64), (

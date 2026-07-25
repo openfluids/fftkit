@@ -51,13 +51,28 @@ def all_backends_param(transform=None):
         ``@pytest.mark.parametrize("backend", all_backends_param(...))``.
     """
     available = set(fftkit.get_available_backends())
+    # Accept a single transform name or a sequence, so a test exercising more
+    # than one (e.g. an ifft(fft(x)) round trip) skips unless the backend
+    # implements every transform it actually calls. Parametrizing such a test
+    # on "fft" alone let it run against accelerate, which has no ifft.
+    if transform is None:
+        required = ()
+    elif isinstance(transform, str):
+        required = (transform,)
+    else:
+        required = tuple(transform)
+
     params = []
     for name in fftkit.get_backend_names():
         reasons = []
         if name not in available:
             reasons.append(f"backend '{name}' not available on this machine")
-        elif transform is not None and not BACKENDS[name].supports(transform):
-            reasons.append(f"backend '{name}' does not implement '{transform}'")
+        else:
+            missing = [t for t in required if not BACKENDS[name].supports(t)]
+            if missing:
+                reasons.append(
+                    f"backend '{name}' does not implement " + ", ".join(f"'{t}'" for t in missing)
+                )
         params.append(
             pytest.param(
                 name,
@@ -95,6 +110,49 @@ def partial_backends_param(transform):
             )
         )
     return params
+
+
+# ---------------------------------------------------------------------------
+# Declared backend limits
+# ---------------------------------------------------------------------------
+# accelerate wraps Apple's vDSP through ctypes and is deliberately narrow: a
+# 1-D complex forward FFT of power-of-two length, no n= padding/truncation,
+# and no norm other than the default. Those limits are declared by the
+# backend itself (ValueError / NotImplementedError with specific messages),
+# so the matrix tests assert them rather than skipping past them.
+#
+# They went unnoticed until CI ran on macOS: accelerate is unavailable on
+# Linux, so every one of these cases was a silent skip locally and in the
+# Linux jobs. 18 tests failed the first time a macOS runner saw them.
+POW2_ONLY_BACKENDS = {"accelerate"}
+NO_N_ARGUMENT_BACKENDS = {"accelerate"}
+DEFAULT_NORM_ONLY_BACKENDS = {"accelerate"}
+
+
+def is_power_of_two(n):
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def assert_declared_limit(backend, call, *, length=None, n=None, norm=None):
+    """Assert a backend's documented refusal, if this call violates one.
+
+    Returns True when a limit applied and the documented exception was raised
+    (the caller should stop; there is no numeric result to compare), False
+    when the call is within the backend's contract and should be run normally.
+    """
+    if backend in NO_N_ARGUMENT_BACKENDS and n is not None:
+        with pytest.raises(NotImplementedError, match="n="):
+            call()
+        return True
+    if backend in DEFAULT_NORM_ONLY_BACKENDS and norm not in (None, "backward"):
+        with pytest.raises(NotImplementedError, match="norm="):
+            call()
+        return True
+    if backend in POW2_ONLY_BACKENDS and length is not None and not is_power_of_two(length):
+        with pytest.raises(ValueError, match="power-of-two"):
+            call()
+        return True
+    return False
 
 
 def pytest_configure(config):

@@ -260,7 +260,19 @@ def _torch_backend() -> Backend:
             if func is None:
                 raise NotImplementedError(f"Backend '{name}' does not implement '{transform}'.")
             x_t = torch.from_numpy(np.asarray(x))
-            result = func(x_t, s=s, dim=axes, norm=norm)
+            # Omit s=/dim= entirely when unset rather than forwarding None.
+            # scipy and numpy read axes=None as "use the default axes", but
+            # torch.fft.fft2 rejects it outright:
+            #   TypeError: fft_fft2(): argument 'dim' must be tuple of ints,
+            #              not NoneType
+            # Leaving the keyword out lets torch apply its own default, which
+            # matches scipy's (last two axes for *2, all axes for *n).
+            kwargs: dict[str, Any] = {"norm": norm}
+            if s is not None:
+                kwargs["s"] = s
+            if axes is not None:
+                kwargs["dim"] = axes
+            result = func(x_t, **kwargs)
             arr: ArrayResult = result.numpy()
             return arr
 
