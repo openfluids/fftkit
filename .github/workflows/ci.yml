@@ -106,27 +106,30 @@ jobs:
       - name: Install uv
         run: pip install uv
 
-      - name: Sync environment
-        run: uv sync
+      # pyfftw, mkl_fft and tensorflow-cpu come from the `backends` dependency
+      # group, so they resolve from uv.lock and this job installs the same
+      # versions every run. They used to be a bare `uv pip install` line here,
+      # which is how tensorflow came to be absent for an entire release: an
+      # undeclared dependency is nobody's responsibility to keep.
+      - name: Sync environment with the optional backends
+        run: uv sync --group backends
 
-      - name: Install optional CPU backends
+      - name: Install torch from the CPU index
         run: |
-          # mkl-fft publishes to PyPI, so this needs neither the Intel index nor
-          # permission to fail. Verified resolvable from pypi.org: mkl-fft 2.2.1.
-          #
-          # tensorflow-cpu, not tensorflow: these runners have no GPU, and the
-          # default wheel drags in the whole CUDA stack for nothing. The backend
-          # still registers under the name "tensorflow" either way, which is why
-          # the gate below asks for that and not the package name.
-          uv pip install pyfftw mkl-fft tensorflow-cpu
+          # Not in the `backends` group: the PyPI wheel bundles the whole CUDA
+          # stack, gigabytes of it, for a runner with no GPU. Only PyTorch's own
+          # index publishes a CPU-only build, and a per-package index URL cannot
+          # be expressed in a dependency group.
           uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       # A hard gate, not a print. Without this the job can go green having
       # installed nothing: the backend parametrization skips what is missing,
       # so a silent install failure removes exactly the tests this job exists
       # to run and still reports success.
-      # --no-sync for the same reason as test-minversion: these backends are
-      # installed outside uv.lock, and a re-sync could drop them.
+      # --no-sync is load-bearing. `uv run` re-syncs to the DEFAULT groups first,
+      # and `backends` is not one of them, so a plain `uv run` would uninstall
+      # the very backends this job just installed -- torch included, which is
+      # outside the lock entirely.
       - name: Require the backends this job exists to exercise
         run: |
           uv run --no-sync python - <<'PY'

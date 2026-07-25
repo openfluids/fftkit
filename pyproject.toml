@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fftkit"
-version = "0.3.0"
+version = "0.4.0"
 description = "One FFT API over many backends: scipy, numpy, Intel MKL, CuPy, PyTorch, TensorFlow, pyFFTW, Accelerate"
 readme = "README.md"
 license = "Apache-2.0"
@@ -62,7 +62,12 @@ gpu = ["cupy-cuda12x"]
 # CPU-installable backends only; the cuda* extras are hardware-specific and
 # would fail to install (or install the wrong CUDA major) on a machine
 # without a matching GPU/toolkit, so they are deliberately excluded here.
-all = ["mkl_fft", "pyfftw", "torch"]
+#
+# Be aware this is a large install: the PyPI wheels for both torch and
+# tensorflow bundle CUDA runtime libraries on Linux whether or not a GPU is
+# present, which runs to several gigabytes. Install the individual extras you
+# need, or the CPU-only builds from their own indexes, if that matters.
+all = ["mkl_fft", "pyfftw", "torch", "tensorflow"]
 # benchmarks/ only - never imported by the library itself.
 bench = ["matplotlib>=3.7", "tabulate>=0.9"]
 
@@ -108,6 +113,27 @@ dev = [
     { include-group = "test" },
     { include-group = "lint" },
     { include-group = "typecheck" },
+]
+# Optional backends, declared so the cross-backend agreement suite is
+# reproducible from the lock file instead of from ad-hoc `uv pip install` lines
+# in CI. Nothing here is needed to develop the library; without them those tests
+# skip, which is exactly the failure this group exists to prevent: the
+# tensorflow backend shipped a defect in 0.3.0 because its 123 tests were
+# installed nowhere and therefore ran nowhere.
+#
+# Deliberately a separate group rather than part of `test`. tensorflow publishes
+# no cp314 wheel, and `test` is synced by every leg of the matrix including
+# Python 3.14, where an unconditional entry would break `uv sync` outright. The
+# marker makes the group safe to sync on any interpreter; on 3.14 it resolves to
+# nothing and those tests skip until upstream ships a wheel.
+#
+# torch is absent on purpose: the PyPI wheel pulls the entire CUDA stack, so CI
+# installs it from PyTorch's CPU index instead. Adding it here would cost gigabytes
+# per run for no benefit on a GPU-less runner.
+backends = [
+    "pyfftw",
+    "mkl_fft",
+    "tensorflow-cpu; python_version < '3.14'",
 ]
 
 [tool.ruff]

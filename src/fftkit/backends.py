@@ -94,8 +94,14 @@ class AxisDefaultWarning(UserWarning):
 
     A UserWarning subclass rather than DeprecationWarning on purpose:
     DeprecationWarning is hidden by default outside ``__main__``, so library
-    users -- exactly the people affected -- would never see it. Slated for
-    removal in 0.3.0.
+    users -- exactly the people affected -- would never see it.
+
+    This was originally slated for removal in 0.3.0 and is still here in 0.4.0.
+    Deliberately, on reflection: 0.1.x callers who passed 2-D arrays without an
+    ``axis`` get silently different numbers, and nothing but this warning tells
+    them. The cost of keeping it is one warning for a case that is arguably a bug
+    in the calling code anyway; the cost of dropping it is a wrong answer nobody
+    is told about. It goes when 0.1.x is far enough back to be irrelevant.
     """
 
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-25
+
 ### Fixed
 - The `tensorflow` backend raised on real input. `tf.signal.fft`/`ifft` accept
   only `complex64`/`complex128`, and the adapter forwarded `float64` unchanged,
@@ -36,6 +38,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `2*(m-1)`. That gave a 28% error for `norm='ortho'` and 48% for
   `norm='forward'`, with nothing raised. Introduced and caught within this
   unreleased change, so never shipped.
+
+### Changed
+- New `backends` dependency group (`pyfftw`, `mkl_fft`, `tensorflow-cpu`), so the
+  optional backends the agreement suite needs resolve from `uv.lock` rather than
+  from ad-hoc `uv pip install` lines in CI. Install with
+  `uv sync --group backends`. It is a separate group rather than part of `test`
+  because `tensorflow` publishes no cp314 wheel and `test` is synced on every leg
+  of the matrix including Python 3.14; the entry carries a
+  `python_version < '3.14'` marker so the group stays safe to sync anywhere.
+  `torch` stays outside it, since only PyTorch's own index publishes a CPU-only
+  build and a per-package index cannot be expressed in a group.
+- The `all` extra now includes `tensorflow`, which it had omitted while claiming
+  to cover every CPU-installable backend. Note that the PyPI wheels for both
+  `torch` and `tensorflow` bundle CUDA runtime libraries on Linux whether or not
+  a GPU is present, so `fftkit[all]` is a multi-gigabyte install; prefer the
+  individual extras if that matters.
+- `AxisDefaultWarning` was documented as slated for removal in 0.3.0 and is still
+  present. That is now deliberate and the docstring says so: 0.1.x callers who
+  passed a 2-D array without an explicit `axis` get silently different numbers,
+  and this warning is the only thing that tells them.
 
 ### Added
 - `fftkit.spectrum()`, a high-level entry point for spectra of physical signals
