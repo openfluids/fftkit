@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `register_mkl_scipy_backend()` returned a bare `False` for two unrelated
+  causes with different fixes: `mkl_fft` missing entirely, versus `mkl_fft`
+  present but `mkl_fft.interfaces.scipy_fft` also needing the separate `mkl`
+  package, which `mkl-fft` does not declare as a dependency. The second case is
+  actively misleading, because `mkl_available()` is `True` and
+  `get_fft_func('mkl')` works while this function reports failure. It now emits
+  `fftkit.MklBackendWarning` naming the module that failed and the matching fix.
+  The old test could not catch this: it skipped whenever `import mkl_fft`
+  succeeded, so on any machine with working MKL it never ran.
+
+### Changed
+- Dependency-group floors are now meaningful (`ruff>=0.16`, `pytest>=8.4`,
+  `mypy>=1.18`, `hypothesis>=6.130`, `pytest-cov>=6.0`, `scipy-stubs>=1.16`).
+  `ruff>=0.1` let a years-old linter satisfy the lint group.
+- Warnings are errors in the test suite (`filterwarnings = ["error"]`), so an
+  upstream `DeprecationWarning` fails the run instead of scrolling past it.
+
+### Testing
+- Coverage raised from 67% to 96%; a 90% floor is enforced via
+  `[tool.coverage.report] fail_under`. The only uncovered code left is the
+  macOS-only Accelerate/vDSP body.
+
+### CI
+- Jobs install dependencies with `uv sync` from the groups declared in
+  `pyproject.toml` instead of repeating `pip install pytest hypothesis ...` in
+  four places. That duplication is what let `hypothesis` go missing from every
+  test job and break collection.
+- New `test-latest` job re-resolves the newest compatible dependencies,
+  ignoring `uv.lock`. Syncing from the lock is right for reproducibility but
+  stops CI seeing a new numpy or scipy the day it ships, and users install
+  unpinned. `test-minversion` (declared floors), `test` (locked) and
+  `test-latest` (newest) now cover all three.
+- `uv lock --check` gate, so the lock cannot drift from the manifest.
+- Dependabot now tracks `pip` as well as `github-actions`.
+
 ## [0.2.0] - 2026-07-25
 
 `0.1.0` remains MIT-licensed, as published. Apache-2.0 applies from `0.2.0`

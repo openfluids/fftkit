@@ -584,22 +584,22 @@ provides-extras = ["mkl", "pyfftw", "tensorflow", "torch", "cuda12", "cuda11", "
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "hypothesis" },
-    { name = "mypy" },
-    { name = "pytest", specifier = ">=7.0" },
-    { name = "pytest-cov" },
-    { name = "ruff", specifier = ">=0.1" },
-    { name = "scipy-stubs" },
+    { name = "hypothesis", specifier = ">=6.130" },
+    { name = "mypy", specifier = ">=1.18" },
+    { name = "pytest", specifier = ">=8.4" },
+    { name = "pytest-cov", specifier = ">=6.0" },
+    { name = "ruff", specifier = ">=0.16" },
+    { name = "scipy-stubs", specifier = ">=1.16" },
 ]
-lint = [{ name = "ruff", specifier = ">=0.1" }]
+lint = [{ name = "ruff", specifier = ">=0.16" }]
 test = [
-    { name = "hypothesis" },
-    { name = "pytest", specifier = ">=7.0" },
-    { name = "pytest-cov" },
+    { name = "hypothesis", specifier = ">=6.130" },
+    { name = "pytest", specifier = ">=8.4" },
+    { name = "pytest-cov", specifier = ">=6.0" },
 ]
 typecheck = [
-    { name = "mypy" },
-    { name = "scipy-stubs" },
+    { name = "mypy", specifier = ">=1.18" },
+    { name = "scipy-stubs", specifier = ">=1.16" },
 ]
 
 [[package]]

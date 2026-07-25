@@ -32,6 +32,7 @@ from .backends import (
     UNSET_AXIS,
     ArrayResult,
     AxisDefaultWarning,
+    MklBackendWarning,
     TransformFunc,
     accelerate_fft,
     benchmark_backends,
@@ -138,6 +139,7 @@ __all__ = [
     # Version
     "__version__",
     "AxisDefaultWarning",
+    "MklBackendWarning",
     # Config
     "detect_backend",
     "DEFAULT_BACKEND",

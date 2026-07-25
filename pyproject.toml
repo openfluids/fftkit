@@ -85,20 +85,24 @@ include = [
     "/pyproject.toml",
 ]
 
+# Floors here are deliberately recent. An unbounded "ruff" or "pytest>=7.0"
+# lets a years-old tool satisfy the group, so CI can pass with a linter that
+# never learned the rules this project relies on. These track the current
+# releases and are bumped by Dependabot.
 [dependency-groups]
 test = [
-    "pytest>=7.0",
-    "hypothesis",
-    "pytest-cov",
+    "pytest>=8.4",
+    "hypothesis>=6.130",
+    "pytest-cov>=6.0",
 ]
 lint = [
-    "ruff>=0.1",
+    "ruff>=0.16",
 ]
 typecheck = [
-    "mypy",
+    "mypy>=1.18",
     # scipy ships no inline types; without stubs mypy sees Any across every
     # scipy call and --strict passes for the wrong reason.
-    "scipy-stubs",
+    "scipy-stubs>=1.16",
 ]
 dev = [
     { include-group = "test" },
@@ -117,4 +121,28 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "--strict-markers"
+addopts = "--strict-markers --strict-config"
+# Warnings are failures. A DeprecationWarning from numpy or scipy is the
+# earliest signal that an upstream API is going away, and it is worthless if it
+# scrolls past in a green run. Tests that expect a warning assert it with
+# pytest.warns, so nothing here needs a blanket exemption.
+filterwarnings = [
+    "error",
+    # pytest itself may surface unraisable-exception noise from C extensions
+    # during interpreter shutdown; that is not ours to fix and not a signal.
+    "default::pytest.PytestUnraisableExceptionWarning",
+]
+
+[tool.coverage.report]
+show_missing = true
+# A floor, not a target. Measured 93% on a clean scipy+numpy environment (what
+# CI's default job runs) and 94% with mkl and pyfftw installed; 90 leaves room
+# for platform variation -- macOS reaches the Accelerate path, Linux cannot --
+# while still failing if a change drops real coverage.
+fail_under = 90
+exclude_also = [
+    # Script entry guards are unreachable when a module is imported, which is
+    # how every test loads it. Covering them would mean spawning subprocesses
+    # to assert print() output, which tests the shell, not the library.
+    "if __name__ == .__main__.:",
+]

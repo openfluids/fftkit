@@ -167,6 +167,21 @@ class TestUnsupportedTransforms:
         with pytest.raises(NotImplementedError, match="torch.*fftn"):
             _call("fftn", np.zeros((2, 2)))
 
+    @pytest.mark.parametrize("transform", ["fft", "ifft", "rfft", "irfft"])
+    def test_missing_1d_transform_raises_not_implemented(self, monkeypatch, transform):
+        """Same contract as above, but through the 1-D adapter path
+        (_make_1d), which is a separate closure from the N-D one exercised
+        above -- a torch build missing e.g. only 'irfft' must still fail
+        loudly and name itself rather than silently returning None/crashing
+        with an AttributeError.
+        """
+        fake = types.ModuleType("torch")
+        fake.fft = types.SimpleNamespace()  # nothing implemented
+        fake.from_numpy = _FakeTensor
+        monkeypatch.setitem(sys.modules, "torch", fake)
+        with pytest.raises(NotImplementedError, match=f"torch.*{transform}"):
+            _call(transform, np.zeros(8))
+
 
 class TestNumpyRoundTrip:
     def test_returns_numpy_not_tensor(self, stub):

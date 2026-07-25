@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Dependency lists live in pyproject.toml's [dependency-groups] and are
+# installed here with `uv sync`. They used to be spelled out per job as
+# `pip install pytest hypothesis ...`, duplicated across four jobs; the day
+# tests/test_properties.py started importing hypothesis, three of those four
+# lists were wrong and every test job failed at collection. Declaring the
+# dependency once and syncing it is what prevents that class of failure.
+
 jobs:
   lint:
     runs-on: ubuntu-24.04
@@ -16,19 +23,24 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install ruff
-        run: pip install ruff
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync environment
+        run: uv sync
 
       - name: Lint
-        run: ruff check .
+        run: uv run ruff check .
 
       # src/fftkit/py.typed advertises this package as typed. Without this step
       # that claim is unenforced and drifts on the first unannotated addition.
-      - name: Install type checker
-        run: pip install -e . mypy scipy-stubs
-
       - name: Type check
-        run: mypy --strict src/fftkit/ --config-file mypy.ini
+        run: uv run mypy --strict src/fftkit/ --config-file mypy.ini
+
+      # uv.lock must stay consistent with pyproject.toml, or `uv sync` in the
+      # other jobs silently installs something the manifest no longer asks for.
+      - name: Lock file is in sync
+        run: uv lock --check
 
   test:
     runs-on: ${{ matrix.os }}
@@ -54,19 +66,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          # hypothesis is imported by tests/test_properties.py; without it the
-          # whole suite fails at collection, not just that module.
-          pip install pytest pytest-cov hypothesis
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync environment
+        run: uv sync --python ${{ matrix.python-version }}
 
       - name: Run tests
         run: |
-          pytest -v --cov=fftkit --cov-report=term-missing | tee pytest-output.txt
+          uv run pytest -v --cov=fftkit --cov-report=term-missing | tee pytest-output.txt
           {
-            echo "### Coverage summary"
+            echo "### Coverage summary (${{ matrix.os }}, Python ${{ matrix.python-version }})"
             echo '```'
             tail -n 20 pytest-output.txt
             echo '```'
@@ -77,7 +87,7 @@ jobs:
       # (mkl, cupy, torch, tensorflow, pyfftw) are absent here on purpose: this
       # asserts they degrade to "unavailable" instead of breaking the import.
       - name: Import without optional backends
-        run: python -c "import fftkit; print(fftkit.__version__, sorted(fftkit.get_available_backends()))"
+        run: uv run python -c "import fftkit; print(fftkit.__version__, sorted(fftkit.get_available_backends()))"
 
   # Cross-backend agreement tests only parametrize over backends that are
   # actually importable. The jobs above install none of the optional
@@ -93,15 +103,18 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync environment
+        run: uv sync
+
+      - name: Install optional CPU backends
         run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          pip install pytest hypothesis
           # mkl-fft publishes to PyPI, so this needs neither the Intel index nor
           # permission to fail. Verified resolvable from pypi.org: mkl-fft 2.2.1.
-          pip install pyfftw mkl-fft
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install pyfftw mkl-fft
+          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       # A hard gate, not a print. Without this the job can go green having
       # installed nothing: the backend parametrization skips what is missing,
@@ -109,7 +122,7 @@ jobs:
       # to run and still reports success.
       - name: Require the backends this job exists to exercise
         run: |
-          python - <<'PY'
+          uv run python - <<'PY'
           import sys
           import fftkit
 
@@ -127,7 +140,7 @@ jobs:
           PY
 
       - name: Run tests
-        run: pytest -v
+        run: uv run pytest -v
 
       # Prove the agreement tests actually ran against the optional backends
       # rather than being skipped, by counting non-skipped backend-parametrized
@@ -135,7 +148,7 @@ jobs:
       - name: Confirm optional backends were exercised
         run: |
           for b in mkl pyfftw torch; do
-            n=$(pytest -q -k "$b" --no-header 2>/dev/null | tail -1)
+            n=$(uv run pytest -q -k "$b" --no-header 2>/dev/null | tail -1)
             echo "$b: $n"
           done
         shell: bash
@@ -148,21 +161,59 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # numpy 1.24 has no wheels for Python 3.13/3.14; 3.11 is the newest
-      # interpreter with wheels for both pinned floors.
+      # numpy 1.24 has no wheels for Python 3.13/3.14, and building it from
+      # source fails on 3.12+ because distutils was removed from the stdlib.
+      # 3.11 is the newest interpreter that can install both pinned floors.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install "numpy==1.24.*" "scipy==1.10.*"
-          pip install -e . --no-deps
-          pip install pytest hypothesis
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync environment
+        run: uv sync --python 3.11
+
+      # Downgrade AFTER syncing: uv.lock pins current numpy/scipy, and this job
+      # exists to prove the declared floors still work, not the locked versions.
+      - name: Pin the declared dependency floors
+        run: uv pip install "numpy==1.24.*" "scipy==1.10.*"
+
+      - name: Show versions under test
+        run: uv run python -c "import numpy, scipy; print('numpy', numpy.__version__, 'scipy', scipy.__version__)"
 
       - name: Run tests
-        run: pytest -v
+        run: uv run pytest -v
+
+  # The matrix above syncs from uv.lock, which is the right default for
+  # reproducibility but means CI stops seeing a brand-new numpy or scipy the day
+  # it ships. Users install fftkit unpinned, so "latest" is their real
+  # environment: this job re-resolves everything to the newest compatible
+  # release and ignores the lock.
+  #
+  # Deliberately blocking rather than continue-on-error. A canary nobody has to
+  # fix is a canary nobody reads, and shipping a library that breaks against
+  # current numpy is worse than a red build that names the reason.
+  test-latest:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Resolve newest compatible dependencies
+        run: uv sync --upgrade
+
+      - name: Show versions under test
+        run: uv run python -c "import numpy, scipy; print('numpy', numpy.__version__, 'scipy', scipy.__version__)"
+
+      - name: Run tests
+        run: uv run pytest -v
 
   package:
     runs-on: ubuntu-24.04
@@ -173,11 +224,11 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install build tools
-        run: pip install build twine
+      - name: Install uv
+        run: pip install uv
 
       - name: Build
-        run: python -m build
+        run: uv build
 
       - name: Check package
-        run: twine check dist/*
+        run: uvx twine check dist/*

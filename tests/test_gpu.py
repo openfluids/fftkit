@@ -239,6 +239,60 @@ class TestGPUBatchFFTCPUFallback:
         with pytest.raises(RuntimeError, match="GPU not available"):
             processor.rfft_batch(data, axis=1, fallback=False)
 
+    @pytest.mark.skipif(
+        fftkit.gpu_available(),
+        reason="unavailable-guard path only triggers when GPU is unavailable"
+    )
+    def test_to_gpu_raises_when_unavailable(self):
+        processor = fftkit.GPUBatchFFT()
+        with pytest.raises(RuntimeError, match="GPU not available"):
+            processor.to_gpu(np.arange(4))
+
+    @pytest.mark.skipif(
+        fftkit.gpu_available(),
+        reason="unavailable-guard path only triggers when GPU is unavailable"
+    )
+    def test_to_cpu_raises_when_unavailable(self):
+        processor = fftkit.GPUBatchFFT()
+        with pytest.raises(RuntimeError, match="GPU not available"):
+            processor.to_cpu(np.arange(4))
+
+    @pytest.mark.skipif(
+        fftkit.gpu_available(),
+        reason="unavailable-guard path only triggers when GPU is unavailable"
+    )
+    def test_fft_gpu_resident_raises_when_unavailable(self):
+        processor = fftkit.GPUBatchFFT()
+        with pytest.raises(RuntimeError, match="GPU not available"):
+            processor.fft_gpu_resident(np.arange(4) + 0j)
+
+    @pytest.mark.skipif(
+        fftkit.gpu_available(),
+        reason="unavailable-guard path only triggers when GPU is unavailable"
+    )
+    def test_ifft_gpu_resident_raises_when_unavailable(self):
+        processor = fftkit.GPUBatchFFT()
+        with pytest.raises(RuntimeError, match="GPU not available"):
+            processor.ifft_gpu_resident(np.arange(4) + 0j)
+
+    @pytest.mark.skipif(
+        fftkit.gpu_available(),
+        reason="unavailable-guard path only triggers when GPU is unavailable"
+    )
+    def test_memory_info_returns_unavailable_shape(self):
+        processor = fftkit.GPUBatchFFT()
+        assert processor.memory_info() == {'available': False}
+
+    @pytest.mark.skipif(
+        fftkit.gpu_available(),
+        reason="unavailable-guard path only triggers when GPU is unavailable"
+    )
+    def test_clear_cache_is_a_no_op_when_unavailable(self):
+        """Must return cleanly (no AttributeError from a None self.cp),
+        since there is nothing to clear."""
+        processor = fftkit.GPUBatchFFT()
+        assert processor.clear_cache() is None
+
 
 class TestGPUConfig:
     """Test GPU configuration constants."""

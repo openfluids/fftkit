@@ -68,6 +68,15 @@ class AxisDefaultWarning(UserWarning):
     """
 
 
+class MklBackendWarning(UserWarning):
+    """``register_mkl_scipy_backend()`` could not install the MKL scipy backend.
+
+    Carries the name of the module that failed to import, because the function
+    returns a bare ``False`` and the two failure modes need different fixes.
+    See :func:`register_mkl_scipy_backend`.
+    """
+
+
 class _Unset:
     """Sentinel distinguishing 'caller omitted axis' from 'caller passed -1'."""
 
@@ -606,14 +615,43 @@ def cupy_fft(x: ArrayLike, axis: int = -1) -> ArrayResult:
 def register_mkl_scipy_backend() -> bool:
     """Set MKL as the global scipy.fft backend for all scipy.fft calls.
 
-    After calling this, all scipy.fft operations will use MKL automatically.
+    After calling this, all scipy.fft operations use MKL automatically.
+
+    Returns True on success, False if the MKL scipy interface is unavailable.
+    On failure it also emits :class:`MklBackendWarning` naming the missing
+    module, because "False" alone is not actionable and the two ways this
+    fails need different fixes:
+
+    - ``mkl_fft`` is not installed at all -> ``pip install "fftkit[mkl]"``.
+    - ``mkl_fft`` IS installed and fftkit's own ``mkl`` backend works, but
+      ``mkl_fft.interfaces.scipy_fft`` additionally imports the separate
+      ``mkl`` package, which ``mkl-fft`` does not depend on -> ``pip install mkl``.
+
+    The second case is the confusing one: ``mkl_available()`` returns True and
+    ``get_fft_func('mkl')`` works, while this function returns False.
     """
     try:
         import mkl_fft.interfaces.scipy_fft
         from scipy.fft import set_global_backend
         set_global_backend(mkl_fft.interfaces.scipy_fft)
         return True
-    except ImportError:
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or "a required module"
+        if missing == "mkl":
+            hint = (
+                "mkl_fft is installed and fftkit's own 'mkl' backend works, but "
+                "mkl_fft.interfaces.scipy_fft also imports the separate 'mkl' "
+                "package, which mkl-fft does not declare as a dependency. "
+                "Install it with: pip install mkl"
+            )
+        else:
+            hint = 'Install the MKL FFT bindings with: pip install "fftkit[mkl]"'
+        warnings.warn(
+            f"register_mkl_scipy_backend() left scipy.fft unchanged: cannot import "
+            f"{missing!r} ({exc}). {hint}",
+            MklBackendWarning,
+            stacklevel=2,
+        )
         return False
 
 
