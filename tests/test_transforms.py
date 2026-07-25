@@ -370,3 +370,107 @@ def test_unsupported_transform_raises_not_implemented(backend, transform):
     x = np.ones(8) if transform == "rfft" else np.ones(8, dtype=np.complex128)
     with pytest.raises(NotImplementedError):
         func(x, backend=backend)
+
+
+class TestNextFastLen:
+    """fftkit.next_fast_len: the padding-for-speed helper.
+
+    Its value is a performance property, which a unit test cannot assert
+    reliably (timings are machine- and load-dependent). What IS testable is the
+    contract the speedup rests on: the returned length is at least n, is built
+    only from small prime factors, and composes with the n= argument to give
+    exactly the transform scipy would give at that length. The measured
+    speedups live in the function's docstring and benchmarks/study_padding.py.
+    """
+
+    @pytest.mark.parametrize("n", [1, 2, 7, 100, 10007, 65521, 262139])
+    def test_never_shorter_than_requested(self, n):
+        assert fftkit.next_fast_len(n) >= n
+
+    @pytest.mark.parametrize("n", [2, 4, 8, 1024, 4096, 65536])
+    def test_already_fast_lengths_are_unchanged(self, n):
+        """Powers of two are optimal for every radix-2 implementation, so
+        padding them would be pure waste."""
+        assert fftkit.next_fast_len(n) == n
+
+    @pytest.mark.parametrize("n", [10007, 65521, 262139, 1000003])
+    def test_result_factors_into_small_primes(self, n):
+        """The whole point: a length whose factors are small primes takes the
+        radix path instead of Bluestein/direct-DFT. scipy's preferred radices
+        are 2, 3, 5, 7 and 11, so the result must contain no larger factor."""
+        m = fftkit.next_fast_len(n)
+        remaining = m
+        for prime in (2, 3, 5, 7, 11):
+            while remaining % prime == 0:
+                remaining //= prime
+        assert remaining == 1, (
+            f"next_fast_len({n}) = {m} still has a factor {remaining} outside "
+            "{2,3,5,7,11}, which would defeat the radix path"
+        )
+
+    @pytest.mark.parametrize("n", [97, 10007, 65521])
+    def test_agrees_with_scipy(self, n):
+        """Documented as delegating to scipy; if that changes, the docstring's
+        measured speedups no longer describe this function."""
+        assert fftkit.next_fast_len(n) == spfft.next_fast_len(n)
+        assert fftkit.next_fast_len(n, real=True) == spfft.next_fast_len(n, real=True)
+
+    @pytest.mark.parametrize("backend", all_backends_param("fft"))
+    def test_composes_with_n_argument(self, backend):
+        """The documented idiom, fft(x, n=next_fast_len(len(x))), must give
+        exactly scipy's transform at the padded length -- padding for speed
+        must not change the answer."""
+        rng = np.random.default_rng(21)
+        n = 1013  # prime, so next_fast_len actually moves
+        x = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        target = fftkit.next_fast_len(n)
+        assert target > n, "test is pointless if the length does not change"
+        if assert_declared_limit(
+            backend, lambda: fftkit.fft(x, n=target, backend=backend), n=target
+        ):
+            return
+        result = fftkit.fft(x, n=target, backend=backend)
+        assert result.shape[-1] == target
+        assert np.allclose(result, spfft.fft(x, n=target), rtol=RTOL_F64, atol=ATOL_F64)
+
+    def test_padding_interpolates_rather_than_resolves(self):
+        """Padding refines the frequency grid but adds no resolution. Guards the
+        docstring claim, since users reach for padding expecting the opposite:
+        the padded spectrum must be finer-grained yet peak at the same
+        frequency, not reveal a second tone that was not separable before.
+        """
+        fs, n = 1000.0, 512
+        t = np.arange(n) / fs
+        x = np.sin(2 * np.pi * 100.0 * t)
+        target = 4 * n
+
+        plain = np.abs(fftkit.rfft(x))
+        padded = np.abs(fftkit.rfft(x, n=target))
+        f_plain = fftkit.rfftfreq(n, 1 / fs)
+        f_padded = fftkit.rfftfreq(target, 1 / fs)
+
+        # Finer grid...
+        assert f_padded[1] - f_padded[0] < f_plain[1] - f_plain[0]
+        # ...but the same peak, within one bin of the padded grid.
+        assert abs(f_padded[np.argmax(padded)] - f_plain[np.argmax(plain)]) <= (
+            f_padded[1] - f_padded[0]
+        )
+
+
+class TestWorkersDoesNotInterfereWithOtherKeywords:
+    """`workers=` is the newest keyword on the matrix; the risk worth a
+    regression test is not threading itself (see test_workers.py) but that
+    adding it broke the existing n=/axis=/norm= keywords it now sits next
+    to -- e.g. an argument-order slip that shifted a positional binding.
+    """
+
+    @pytest.mark.parametrize("backend", all_backends_param("fft"))
+    def test_workers_alongside_n_axis_norm_on_fft(self, backend):
+        x = _complex_signal(100, np.complex128)
+        if assert_declared_limit(backend, lambda: fftkit.fft(x, backend=backend), length=100):
+            return
+        with_workers = fftkit.fft(x, n=128, axis=-1, norm="ortho", backend=backend, workers=None)
+        without_workers = fftkit.fft(x, n=128, axis=-1, norm="ortho", backend=backend)
+        assert np.array_equal(with_workers, without_workers)
+        expected = spfft.fft(x, n=128, axis=-1, norm="ortho")
+        assert np.allclose(with_workers, expected, rtol=RTOL_F64, atol=ATOL_F64)

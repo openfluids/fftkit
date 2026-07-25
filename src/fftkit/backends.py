@@ -26,11 +26,42 @@ Environment variables:
 
 ``FFTKIT_BACKEND``: Override the default FFT backend (takes precedence)
     export FFTKIT_BACKEND=mkl
+
+Threading (``workers=``):
+
+Every transform in the matrix accepts an optional ``workers`` keyword, the
+last argument in each signature. It is a performance hint, not part of the
+numerical contract:
+
+- ``workers=None`` (the default): pass nothing to the backend, i.e. a true
+  no-op that leaves the backend's own default threading untouched.
+- ``workers=-1``: use all available cores (``scipy.fft`` interprets this
+  natively; the ``pyfftw`` adapter maps it to ``os.cpu_count()``).
+- ``workers=N``: use ``N`` threads, where the backend supports it.
+
+Only ``scipy`` (``workers=``) and ``pyfftw`` (mapped to ``threads=``) honour
+this. Every other backend -- ``numpy`` (no threading support), ``mkl``
+(threads via its own environment/runtime, not a per-call argument), ``cupy``,
+``torch``, ``tensorflow`` (inherently parallel, no per-call equivalent) and
+``accelerate`` (a single-threaded ctypes path) -- silently ignores it rather
+than raising, so code written against scipy's ``workers=`` keyword stays
+portable across every backend in the matrix. This is safe specifically
+because ``workers`` only ever changes how many threads compute a result, never
+the result itself.
+
+**MPI / multi-process users:** this library is commonly run one process per
+MPI rank during DNS/LES post-processing. ``workers=-1`` inside N ranks on an
+N-core node spawns up to N threads *per rank*, oversubscribing the node by a
+factor of N. The default (``workers=None``) is deliberately conservative for
+exactly this reason -- opt into ``workers=-1``/``workers=N`` only in
+single-process, single-rank contexts (e.g. interactive post-processing on a
+workstation), never inside an MPI-parallel run.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import warnings
 from typing import Any, Callable
@@ -156,6 +187,7 @@ def _lazy_module_backend(
     module_path: str,
     transforms: tuple[str, ...] = TRANSFORM_NAMES,
     setup: Callable[[Any], None] | None = None,
+    workers_kwarg: str | None = None,
 ) -> Backend:
     """Build a Backend that imports ``module_path`` lazily and delegates directly.
 
@@ -166,12 +198,24 @@ def _lazy_module_backend(
     ``setup``, if given, runs once with the imported module the first time any
     transform on this backend is called. It exists for namespaces whose defaults
     suit one-shot scripts rather than a library: see ``_pyfftw_setup``.
+
+    ``workers_kwarg``, if given, is the name the underlying module uses for its
+    own thread-count argument (``"workers"`` for scipy, ``"threads"`` for
+    pyfftw). The caller-facing ``workers`` keyword is always popped out of
+    ``kwargs`` here, so a module with ``workers_kwarg=None`` (numpy, mkl)
+    silently drops it instead of forwarding an argument the underlying
+    function does not accept. When ``workers_kwarg="threads"``,
+    ``workers=-1`` is translated to ``os.cpu_count()`` because pyfftw, unlike
+    scipy, does not treat -1 as "all cores" itself. ``workers=None`` never
+    reaches this branch at all: nothing is added to ``kwargs``, which is the
+    true no-op the default is supposed to be.
     """
     done = False
 
     def _make(transform: str) -> TransformFunc:
         def fn(*args: Any, **kwargs: Any) -> ArrayResult:
             nonlocal done
+            workers = kwargs.pop("workers", None)
             module = importlib.import_module(module_path)
             if setup is not None and not done:
                 setup(module)
@@ -179,6 +223,10 @@ def _lazy_module_backend(
             func = getattr(module, transform, None)
             if func is None:
                 raise NotImplementedError(f"Backend '{name}' does not implement '{transform}'.")
+            if workers is not None and workers_kwarg is not None:
+                if workers == -1 and workers_kwarg == "threads":
+                    workers = os.cpu_count()
+                kwargs[workers_kwarg] = workers
             result: ArrayResult = func(*args, **kwargs)
             return result
 
@@ -220,6 +268,11 @@ def _cupy_backend() -> Backend:
         def fn(x: ArrayLike, *args: Any, **kwargs: Any) -> ArrayResult:
             import cupy as cp
 
+            # cupy.fft has no per-call thread-count argument -- cuFFT already
+            # parallelises across the GPU's own cores -- so `workers` is a
+            # no-op hint here, not something to forward. Popped rather than
+            # left in kwargs so it never reaches cp.fft, which would raise.
+            kwargs.pop("workers", None)
             func = getattr(cp.fft, transform, None)
             if func is None:
                 raise NotImplementedError(f"Backend '{name}' does not implement '{transform}'.")
@@ -243,9 +296,17 @@ def _torch_backend() -> Backend:
     name = "torch"
 
     def _make_1d(transform: str) -> TransformFunc:
-        def fn(x: ArrayLike, n: int | None = None, axis: int = -1, norm: str | None = None) -> ArrayResult:
+        def fn(
+            x: ArrayLike, n: int | None = None, axis: int = -1, norm: str | None = None,
+            workers: int | None = None,
+        ) -> ArrayResult:
             import torch
 
+            # torch.fft has no thread-count argument of its own -- it is
+            # already inherently parallel (CPU: intra-op threads; CUDA: the
+            # GPU) -- so `workers` is accepted only to satisfy the shared
+            # call signature and is otherwise a no-op here.
+            del workers
             func = getattr(torch.fft, transform, None)
             if func is None:
                 raise NotImplementedError(f"Backend '{name}' does not implement '{transform}'.")
@@ -261,9 +322,12 @@ def _torch_backend() -> Backend:
     ) -> TransformFunc:
         def fn(
             x: ArrayLike, s: tuple[int, ...] | None = None, axes: tuple[int, ...] | None = None,
-            norm: str | None = None,
+            norm: str | None = None, workers: int | None = None,
         ) -> ArrayResult:
             import torch
+
+            # See _make_1d: no per-call thread-count equivalent, ignored.
+            del workers
 
             func = getattr(torch.fft, transform, None)
             if func is None:
@@ -290,6 +354,48 @@ def _torch_backend() -> Backend:
     funcs = {t: _make_1d(t) for t in ("fft", "ifft", "rfft", "irfft")}
     funcs.update({t: _make_nd(t) for t in ("fft2", "ifft2", "fftn", "ifftn")})
     return Backend(name, funcs)
+
+
+def next_fast_len(n: int, real: bool = False) -> int:
+    """Smallest length >= ``n`` that FFT implementations transform quickly.
+
+    A prime-length transform falls back to Bluestein's algorithm or a direct
+    DFT; a length whose factors are small primes gets the radix path. The gap
+    is not marginal. Measured on an AMD Ryzen 9 9900X with scipy 1.18:
+
+        N = 10007  (prime)  0.294 ms  ->  10080   0.068 ms    4.3x
+        N = 65521  (prime)  3.440 ms  ->  65536   0.542 ms    6.4x
+        N = 262139 (prime) 15.886 ms  -> 262144   1.411 ms   11.3x
+
+    The last case adds five zeros for an eleven-fold speedup. Pair this with
+    the ``n=`` argument, which does the zero-padding:
+
+        X = fftkit.fft(x, n=fftkit.next_fast_len(len(x)))
+
+    Args:
+        n: Minimum length required.
+        real: Pass True when the transform is ``rfft``/``irfft``; some sizes are
+            fast for real input but not complex, and vice versa.
+
+    Returns:
+        The next fast length, or ``n`` itself if it is already fast.
+
+    Note:
+        Delegates to :func:`scipy.fft.next_fast_len`, whose preferred radices
+        are 2, 3, 5, 7 and 11. FFTW agrees with it on every length tested here.
+        cuFFT prefers products of 2, 3, 5 and 7 only, so for the ``cupy``
+        backend an 11-smooth result from this function may not be optimal --
+        measure with ``fftkit bench`` if that matters for your sizes.
+
+        Padding changes the transform: it interpolates the spectrum onto a
+        finer frequency grid without adding resolution, and it alters power
+        normalisation. Use it for speed and for peak-location refinement, not
+        to separate two tones that were unresolved at the original length.
+    """
+    from scipy.fft import next_fast_len as _scipy_next_fast_len
+
+    result: int = _scipy_next_fast_len(n, real=real)
+    return result
 
 
 def _resize_axis(arr: NDArray[Any], n: int, axis: int) -> NDArray[Any]:
@@ -328,9 +434,16 @@ def _tensorflow_backend() -> Backend:
             raise NotImplementedError(f"Backend '{name}' does not support norm={norm!r}.")
 
     def _make_1d(tf_name: str) -> TransformFunc:
-        def fn(x: ArrayLike, n: int | None = None, axis: int = -1, norm: str | None = None) -> ArrayResult:
+        def fn(
+            x: ArrayLike, n: int | None = None, axis: int = -1, norm: str | None = None,
+            workers: int | None = None,
+        ) -> ArrayResult:
             import tensorflow as tf
 
+            # tf.signal has no per-call thread-count argument -- TensorFlow's
+            # op-level parallelism is controlled process-wide, not per FFT --
+            # so `workers` is accepted for signature compatibility and ignored.
+            del workers
             _check_norm(norm)
             x_arr = np.asarray(x)
             # tf.signal.fft/ifft take no fft_length, so n= has to be applied by
@@ -361,10 +474,12 @@ def _tensorflow_backend() -> Backend:
     def _make_2d(tf_name: str) -> TransformFunc:
         def fn(
             x: ArrayLike, s: tuple[int, ...] | None = None, axes: tuple[int, ...] | None = None,
-            norm: str | None = None,
+            norm: str | None = None, workers: int | None = None,
         ) -> ArrayResult:
             import tensorflow as tf
 
+            # See _make_1d: no per-call thread-count equivalent, ignored.
+            del workers
             _check_norm(norm)
             resolved_axes = (-2, -1) if axes is None else tuple(axes)
             x_arr = np.asarray(x)
@@ -409,10 +524,17 @@ def _accelerate_backend() -> Backend:
     """
     name = "accelerate"
 
-    def _fft(x: ArrayLike, n: int | None = None, axis: int = -1, norm: str | None = None) -> ArrayResult:
+    def _fft(
+        x: ArrayLike, n: int | None = None, axis: int = -1, norm: str | None = None,
+        workers: int | None = None,
+    ) -> ArrayResult:
         import ctypes
         import ctypes.util
 
+        # vDSP is called here through a single-threaded ctypes path with no
+        # thread-count argument, so `workers` is accepted for signature
+        # compatibility and otherwise ignored.
+        del workers
         if sys.platform != "darwin":
             raise NotImplementedError("Accelerate FFT is only available on macOS.")
         if n is not None:
@@ -462,10 +584,12 @@ def _accelerate_backend() -> Backend:
 # registration) decides what can actually run on this machine.
 
 BACKENDS: dict[str, Backend] = {
-    "scipy": _lazy_module_backend("scipy", "scipy.fft"),
+    "scipy": _lazy_module_backend("scipy", "scipy.fft", workers_kwarg="workers"),
     "numpy": _lazy_module_backend("numpy", "numpy.fft"),
     "mkl": _lazy_module_backend("mkl", "mkl_fft.interfaces.numpy_fft"),
-    "pyfftw": _lazy_module_backend("pyfftw", "pyfftw.interfaces.numpy_fft", setup=_pyfftw_setup),
+    "pyfftw": _lazy_module_backend(
+        "pyfftw", "pyfftw.interfaces.numpy_fft", setup=_pyfftw_setup, workers_kwarg="threads"
+    ),
     "cupy": _cupy_backend(),
     "torch": _torch_backend(),
     "tensorflow": _tensorflow_backend(),
