@@ -257,43 +257,110 @@ switches to a CPU-vs-GPU comparison sweep.
 
 ```bash
 pip install fftkit               # numpy + scipy only, always works
-pip install "fftkit[mkl]"        # + Intel MKL
-pip install "fftkit[pyfftw]"     # + pyFFTW / FFTW3
-pip install "fftkit[torch]"      # + PyTorch
-pip install "fftkit[tensorflow]" # + TensorFlow
-pip install "fftkit[all]"        # mkl + pyfftw + torch (CPU-installable set)
 ```
 
-`fftkit[gpu]` needs a CUDA-matched CuPy wheel and will not build from a
-plain `pip install cupy`:
+That is the whole library. Every backend is probed at import time and degrades to
+"unavailable" rather than failing, so an extra only ever adds a faster path — it
+is never required, and omitting one cannot break your code.
+
+### Choosing an extra
+
+Sizes are the largest CPython 3.13 manylinux wheel on PyPI, measured
+2026-07-25. They move; treat them as orders of magnitude.
+
+| Extra | Adds | Wheel | Worth it when |
+|---|---|---|---|
+| `[mkl]` | Intel MKL via `mkl_fft` | 0.2 MB | Intel CPU, large 1-D transforms. Best return of any extra for its size. |
+| `[pyfftw]` | FFTW3 via `pyfftw` | 3 MB | You want FFTW, or per-call thread control via `workers=`. |
+| `[torch]` | PyTorch | 527 MB | You already use torch, or you want CUDA without CuPy. |
+| `[tensorflow]` | TensorFlow | 573 MB | You already use TensorFlow. Partial matrix: no `fftn`/`ifftn`. |
+| `[cuda12]` / `[cuda11]` | CuPy for that CUDA major | 144 MB | NVIDIA GPU, large batches. `[gpu]` is an alias for `[cuda12]`. |
+| `[all]` | mkl + pyfftw + torch + tensorflow | **see below** | Rarely. Read the note first. |
+| `[bench]` | matplotlib, tabulate | small | Running `benchmarks/` yourself. |
+
+### Read this before `pip install "fftkit[all]"`
+
+`[all]` is every CPU-installable backend, and it is a **multi-gigabyte install**
+on Linux. Two reasons, and neither is obvious from the table:
+
+- The PyPI wheels for `torch` and `tensorflow` are built against CUDA. On Linux
+  `torch` alone pulls **15 separate `nvidia-*` runtime packages**, whether or not
+  a GPU exists on the machine.
+- Wheel size understates the result. `tensorflow-cpu` is a 274 MB download that
+  occupies **1.3 GB** unpacked.
+
+So `[all]` is the wrong default for a container image, a CI job, or a laptop. Two
+better options:
+
+```bash
+# Install only what you will actually dispatch to.
+pip install "fftkit[mkl,pyfftw]"        # both together: about 3 MB
+
+# Or take the CPU-only builds from their own indexes, which skip the CUDA stack.
+pip install fftkit tensorflow-cpu
+pip install fftkit torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+`tensorflow-cpu` registers under the backend name `tensorflow`, exactly as the
+full package does — fftkit cannot tell them apart and does not need to.
+
+### GPU
+
+`pip install cupy` is a **source-only sdist** that triggers a full local CUDA
+toolkit compile. Use the prebuilt wheel for your CUDA major version instead:
 
 ```bash
 pip install "fftkit[cuda12]"     # CuPy for CUDA 12.x (gpu is an alias for this)
 pip install "fftkit[cuda11]"     # CuPy for CUDA 11.x
 ```
 
-Check your CUDA version with `nvcc --version` before picking one, and
-confirm the NVIDIA driver is present with `nvidia-smi`.
+Check your CUDA version with `nvcc --version` before picking one, and confirm the
+driver is present with `nvidia-smi`. A mismatch between wheel and driver shows up
+as an import failure, which fftkit reports as the backend being unavailable
+rather than as an error.
 
-Notes per backend:
+### Notes per backend
 
 - **MKL**: on Intel systems, load the oneAPI environment first
   (`source /opt/intel/oneapi/setvars.sh`) if you have it installed;
   otherwise `pip install "fftkit[mkl]"` is sufficient. Verify with
-  `python -c "import mkl_fft"`.
+  `python -c "import mkl_fft"`. Note that `mkl_fft` does not declare the separate
+  `mkl` package as a dependency, so `register_mkl_scipy_backend()` can need it
+  even when the backend itself works — the warning it raises says which.
 - **pyFFTW**: no extra setup beyond the pip install. fftkit turns on
   pyfftw's plan cache, which pyfftw leaves off by default; without it every
   call re-plans the transform, which costs more than the transform itself at
   small sizes.
-- **CuPy**: requires an NVIDIA GPU with a matching CUDA toolkit/driver.
-- **PyTorch / TensorFlow**: install the CPU or CUDA build per their own
-  instructions; fftkit picks up whichever is present.
-- **Accelerate**: macOS only, with no separate install. It is a thin ctypes
-  wrapper around the system Accelerate framework, and implements only a 1-D
-  complex forward FFT of power-of-two length.
+- **CuPy**: requires an NVIDIA GPU with a matching CUDA toolkit and driver.
+- **PyTorch**: CPU or CUDA build, whichever you install; fftkit uses what is
+  present. The CPU-only build comes from PyTorch's own index, not PyPI.
+- **TensorFlow**: implements a partial matrix. `fft`, `ifft`, `rfft`, `irfft`,
+  `fft2` and `ifft2` all work, with every `norm` and with `n=`/`s=`.
+  `fftn`/`ifftn` raise `NotImplementedError`, because `tf.signal` has no general
+  N-dimensional transform to wrap.
+- **Accelerate**: macOS only, with no separate install. A thin ctypes wrapper
+  around the system Accelerate framework, implementing only a 1-D complex
+  forward FFT of power-of-two length.
+
+Run `fftkit info` to see which of these the current machine will actually use.
+
+### Environment variables
 
 `FFTKIT_BACKEND=<name>` overrides auto-detection (`PYMODAL_FFT_BACKEND` is
 honoured too, for existing modalpy users).
+
+### Working on fftkit
+
+```bash
+uv sync --group dev                  # tests, linter, type checker
+uv sync --group dev --group backends # + pyfftw, mkl_fft, tensorflow-cpu
+```
+
+The `backends` group matters more than it looks. Cross-backend agreement tests
+are parametrized over every registered backend and skip the ones that are absent,
+so a missing install does not fail — it quietly removes the tests. On Python 3.14
+`tensorflow-cpu` has no wheel yet and is skipped by a marker, so use 3.13 if you
+want that backend covered locally.
 
 ## Measured numbers
 
