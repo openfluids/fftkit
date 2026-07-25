@@ -4,13 +4,20 @@
 [![PyPI](https://img.shields.io/pypi/v/fftkit.svg)](https://pypi.org/project/fftkit/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-One FFT API over eight backends: scipy, numpy, Intel MKL, CuPy, PyTorch,
-TensorFlow, pyFFTW, Apple Accelerate. Same call signature everywhere; swap
-`backend=` and keep the rest of your code.
+`fftkit` serves two purposes. `spectrum()` takes a time series from a simulation
+or an experiment and returns a power spectral density with the choices a physical
+analysis needs already made. Below that sits one FFT API over eight backends:
+scipy, numpy, Intel MKL, CuPy, PyTorch, TensorFlow, pyFFTW, Apple Accelerate. The
+call signature is identical everywhere, so you can swap `backend=` and leave the
+rest of your code alone.
 
 ```python
 import fftkit
 
+# You have a signal and you want its spectrum.
+result = fftkit.spectrum(x, t=t)    # see "Spectra of physical signals" below
+
+# You want a faster FFT behind an API you already know.
 fftkit.fft(x)                       # forward complex FFT, default backend
 fftkit.rfft(x, backend="mkl")       # real-input FFT on a specific backend
 fftkit.fftn(x_3d, axes=(0, 1))      # N-D transform
@@ -22,6 +29,146 @@ fftkit.get_available_backends()     # what this machine can actually use
 all available at the top level, each taking `n=`/`s=`, `axis=`/`axes=`,
 `norm=`, and `backend=`. `fftfreq`/`rfftfreq` are re-exported from scipy for
 convenience.
+
+## Spectra of physical signals
+
+Simulation output rarely arrives ready for an FFT. A solver limited by its CFL
+condition writes on a variable time step, so the record has no single sample rate
+and no single Nyquist frequency. Long runs also drift, and that drift deposits
+power in the lowest bins, which is exactly where the largest structures live.
+
+Miss either of those and you still obtain a spectrum, with a slope you can fit and
+publish. Nothing raises an error.
+
+`spectrum()` handles the resampling, detrending, and windowing itself, and
+reports exactly what it did.
+
+```python
+import fftkit
+
+result = fftkit.spectrum(x, t=t)     # t may be non-uniform
+print(result.summary())
+```
+
+```
+PSD via periodogram: 4117 bins, 0 to 503.256 Hz at fs=1006.51 Hz
+  window=hann  detrend=linear
+  integrated power 0.504843 = 1.000 x variance
+  trust up to 357.15 Hz
+  resampled: cubic, 8232 points (fast length)
+```
+
+`result.freqs` and `result.psd` are the spectrum. Everything else is provenance:
+which interpolant ran, whether an anti-alias filter was applied, and which
+estimator was chosen and why. You need those details to defend a figure, and
+recording them now costs less than reconstructing them six months later.
+
+Each default, and the reason for it:
+
+| Step | Default | Reason |
+|---|---|---|
+| Resample to uniform | cubic spline | Measured 219x lower band-power error than linear interpolation on a jittered record. Linear interpolation acts as a low-pass filter with a sinc² response, attenuating the high-frequency end of the spectrum you are measuring. Its extra cost is negligible next to generating the data. |
+| Grid length | already FFT-friendly | The grid spacing is free to choose, so landing on a fast length costs nothing and no zero-padding is ever needed. |
+| Anti-alias | on when downsampling | Without it, energy above the new Nyquist folds back into the band. Measured on a 400 Hz tone resampled into a 200 Hz band: 0.000 spurious power with the filter, 0.355 without it. |
+| Detrend | `linear` | A mean offset lands entirely in the zero-frequency bin; a drift smears power across the lowest frequencies. |
+| Window | `hann` | A record boundary is a discontinuity, and its leakage spreads across decades of a log-log plot. |
+| Scaling | density | `np.sum(psd) * df` equals the variance, so integrating a band gives that band's energy. |
+
+### It chooses the estimator from the signal
+
+Coherent and turbulent signals need different estimators, and choosing the wrong
+one fails silently. `spectrum()` measures how much power sits in narrow peaks
+above a baseline that ignores the spectral slope, then chooses:
+
+```python
+result.method              # 'periodogram' or 'blackman_tukey'
+result.method_choice.tonality   # 0.0 (broadband) to 1.0 (tonal)
+result.method_choice.reason     # why, in words
+```
+
+Measured on synthetic signals at fs = 1000 Hz, N = 8192:
+
+| Signal | Tonality | Chosen |
+|---|---|---|
+| Single 50 Hz tone | 1.000 | periodogram |
+| Three modes (50/120/213 Hz) | 1.000 | periodogram |
+| Tone + 50% noise | 0.680 | periodogram |
+| Turbulence + shedding tone | 0.959 | periodogram |
+| Turbulence, f^-5/3 | 0.000 | blackman_tukey |
+| Steeper broadband, f^-3 | 0.000 | blackman_tukey |
+| White noise | 0.005 | blackman_tukey |
+
+A coherent signal carries no random scatter for averaging to reduce, so
+segmenting the record only costs resolution and blunts the peak being measured.
+On a single tone, Welch lowers the peak from 2.215 to 0.324. A turbulent signal
+is one realisation of a random process, where a raw periodogram carries about
+100% standard error per bin however long the record; there, smoothing is the only
+remedy.
+
+### Why the broadband choice is not Welch
+
+Welch is the usual answer, and one keyword still selects it. But it discards the
+largest scales: segmenting to `nperseg = N/8` raises the lowest resolvable
+frequency eightfold, and a steep spectrum keeps most of its variance below that
+new limit. Blackman–Tukey tapers the autocorrelation instead, which reduces
+variance by the same amount while retaining the whole record:
+
+| Estimator | f^-5/3 | f^-3 | Effective resolution |
+|---|---|---|---|
+| periodogram | 1.02 | 1.00 | 0.122 Hz |
+| Welch, `nperseg=N/8` | 0.27 | 0.04 | 0.977 Hz |
+| Blackman–Tukey, `nlags=N/8` | 1.00 | 1.00 | 0.977 Hz |
+
+Numbers are the fraction of signal variance recovered by integrating the
+estimate. Both smoothed estimators resolve the same 0.977 Hz; only Welch
+discards the variance below it. With the default `bartlett` lag window the
+Blackman–Tukey estimate is also non-negative.
+
+Use `method='welch'` when its independent segments are the point: they yield
+error bars and a direct stationarity check, since comparing one segment against
+another reveals a drifting flow. Blackman–Tukey returns a single smooth curve
+whose bins are correlated, with no equivalent diagnostic.
+`result.power_recovered` reports the fraction of variance the estimate accounts
+for, and `summary()` prints a warning when it falls below 0.9.
+
+### Comparing estimators on your own data
+
+```python
+fftkit.compare_methods(x, fs=fs)
+```
+
+Returns bin width, effective resolution, scatter, recovered power, and peak
+location and height for all three estimators, plus the recommendation and the
+tonality behind it. Compare on `effective_resolution` rather than `df`:
+Blackman–Tukey returns a smooth curve on the full fine grid, so its bin width
+overstates its resolution by a factor of eight.
+
+### Honest bandwidth
+
+Non-uniform sampling has no single Nyquist frequency. The largest gap in the
+record limits the highest frequency you can defend, because within that gap the
+signal is unconstrained.
+
+```python
+report = fftkit.describe_sampling(t)
+print(report.summary())
+```
+
+```
+8192 samples over 8.17774 s, non-uniform (jitter 23.2%)
+  dt: min 0.000600018  median 0.000997957  max 0.00139997
+  frequency range: 0.122283 Hz (1/T) to 357.15 Hz (defensible)
+  nominal Nyquist from median dt: 501.024 Hz
+```
+
+The band between 357 Hz and the 501 Hz you would get from the median interval is
+interpolation, not measurement. `spectrum()` carries the same figure as
+`result.f_max_defensible`.
+
+`resample_uniform(t, x)` is available on its own when you want the uniform record
+rather than the spectrum. It never extrapolates beyond the input range. To reach
+an FFT-friendly length it adjusts the grid spacing instead of truncating, so no
+samples from an expensive run are discarded.
 
 ## Backend support
 
@@ -177,6 +324,10 @@ tests that are otherwise skipped, because most of the suite is parametrized
 over every registered backend rather than only the installed ones.
 
 ## Spectral helpers
+
+These are the individual estimators, useful when you want one directly rather than
+through [`spectrum()`](#spectra-of-physical-signals). They take an already-uniform
+signal and apply no detrending or windowing of their own.
 
 `periodogram_rfft`, `welch_method`, and `blackman_tukey_rfft` compute
 one-sided power spectral density estimates from a real signal, and `find_peaks`

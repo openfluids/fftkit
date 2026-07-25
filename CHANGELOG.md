@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `fftkit.spectrum()`, a high-level entry point for spectra of physical signals
+  and simulation output. It accepts a possibly non-uniform time base, resamples
+  onto a uniform grid whose length is already an FFT-friendly length (adjusting
+  the spacing rather than truncating, so no samples are discarded), detrends,
+  windows, and returns a density-scaled one-sided PSD together with the
+  provenance of every choice made. New in the same module: `resample_uniform`,
+  `describe_sampling`, `compare_methods`, `choose_method`, `tonality`, and the
+  result types `SpectrumResult`, `SamplingReport`, `UniformResampling`,
+  `MethodChoice`, plus `ResamplingWarning`. All exported at the top level.
+- Automatic estimator selection (`method='auto'`, the default). `tonality()`
+  measures the share of power in narrow peaks against a baseline that ignores the
+  spectral slope, so a coherent signal routes to the periodogram and a broadband
+  one to Blackman-Tukey. The decision and the measured tonality are returned in
+  `SpectrumResult.method_choice` rather than applied silently. Spectral flatness
+  is deliberately not used: a steep power law has a low geometric-to-arithmetic
+  mean ratio, so flatness reports "tonal" for the broadband case.
+- `method='blackman_tukey'` on `spectrum()`, with an `nlags=` resolution knob,
+  and Blackman-Tukey added as a third row in `compare_methods()`. It is the
+  broadband default rather than Welch because segmenting raises Welch's lowest
+  resolvable frequency and discards the variance below it: on synthetic fields at
+  matched effective resolution, Welch recovers 0.27 of the variance for
+  `f^-5/3` and 0.04 for `f^-3`, against 1.00 for Blackman-Tukey. `method='welch'`
+  remains available, and is the right choice when independent segments are wanted
+  for error bars or a stationarity check.
+- `SpectrumResult.power_recovered`, the integrated PSD over the signal variance.
+  Departure from 1.0 is a scaling error for the periodogram but a physical
+  low-frequency loss for Welch, so `summary()` prints a warning below 0.9 instead
+  of leaving a 99% variance loss invisible.
+- `compare_methods()` reports `effective_resolution` alongside `df`. Blackman-Tukey
+  returns a smooth estimate on the full fine grid, so comparing estimators on bin
+  width alone overstates its resolution by the segment factor.
+
 ## [0.3.0] - 2026-07-25
 
 ### Fixed
