@@ -22,6 +22,14 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      # src/fftkit/py.typed advertises this package as typed. Without this step
+      # that claim is unenforced and drifts on the first unannotated addition.
+      - name: Install type checker
+        run: pip install -e . mypy scipy-stubs
+
+      - name: Type check
+        run: mypy --strict src/fftkit/ --config-file mypy.ini
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -32,6 +40,10 @@ jobs:
         include:
           # macOS exercises the Accelerate backend path, which cannot run on Linux.
           - os: macos-26
+            python-version: "3.14"
+          # Windows gets a single Python version: it's here to catch
+          # path/newline-handling regressions, not to be a full matrix leg.
+          - os: windows-2022
             python-version: "3.14"
 
     steps:
@@ -46,13 +58,126 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
-          pip install pytest
+          # hypothesis is imported by tests/test_properties.py; without it the
+          # whole suite fails at collection, not just that module.
+          pip install pytest pytest-cov hypothesis
 
       - name: Run tests
-        run: pytest -v
+        run: |
+          pytest -v --cov=fftkit --cov-report=term-missing | tee pytest-output.txt
+          {
+            echo "### Coverage summary"
+            echo '```'
+            tail -n 20 pytest-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        shell: bash
 
       # The core package must work with numpy + scipy alone. Optional backends
       # (mkl, cupy, torch, tensorflow, pyfftw) are absent here on purpose: this
       # asserts they degrade to "unavailable" instead of breaking the import.
       - name: Import without optional backends
         run: python -c "import fftkit; print(fftkit.__version__, sorted(fftkit.get_available_backends()))"
+
+  # Cross-backend agreement tests only parametrize over backends that are
+  # actually importable. The jobs above install none of the optional
+  # accelerators, so those tests have only ever compared scipy against
+  # numpy - every other backend's numerics went unchecked. This job installs
+  # the CPU-only optional backends so the agreement suite exercises them too.
+  test-backends:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest hypothesis
+          # mkl-fft publishes to PyPI, so this needs neither the Intel index nor
+          # permission to fail. Verified resolvable from pypi.org: mkl-fft 2.2.1.
+          pip install pyfftw mkl-fft
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      # A hard gate, not a print. Without this the job can go green having
+      # installed nothing: the backend parametrization skips what is missing,
+      # so a silent install failure removes exactly the tests this job exists
+      # to run and still reports success.
+      - name: Require the backends this job exists to exercise
+        run: |
+          python - <<'PY'
+          import sys
+          import fftkit
+
+          required = {"scipy", "numpy", "mkl", "pyfftw", "torch"}
+          available = set(fftkit.get_available_backends())
+          print("available backends:", sorted(available))
+          missing = sorted(required - available)
+          if missing:
+              sys.exit(
+                  f"FAIL: required backends did not load: {missing}\n"
+                  "This job exists so the cross-backend agreement tests run against more "
+                  "than scipy+numpy.\nA missing backend silently removes those tests, so "
+                  "this is a failure rather than a skip."
+              )
+          PY
+
+      - name: Run tests
+        run: pytest -v
+
+      # Prove the agreement tests actually ran against the optional backends
+      # rather than being skipped, by counting non-skipped backend-parametrized
+      # tests for each one.
+      - name: Confirm optional backends were exercised
+        run: |
+          for b in mkl pyfftw torch; do
+            n=$(pytest -q -k "$b" --no-header 2>/dev/null | tail -1)
+            echo "$b: $n"
+          done
+        shell: bash
+
+  # Nothing else in this workflow pins the floors declared in pyproject.toml's
+  # [project.dependencies]. This job installs exactly those floors to catch
+  # accidental use of newer-numpy/scipy-only APIs.
+  test-minversion:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # numpy 1.24 has no wheels for Python 3.13/3.14; 3.11 is the newest
+      # interpreter with wheels for both pinned floors.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install "numpy==1.24.*" "scipy==1.10.*"
+          pip install -e . --no-deps
+          pip install pytest hypothesis
+
+      - name: Run tests
+        run: pytest -v
+
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build
+        run: python -m build
+
+      - name: Check package
+        run: twine check dist/*

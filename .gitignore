@@ -45,3 +45,10 @@ benchmarks/out/
 
 # macOS
 .DS_Store
+
+# Local working notes, not part of the distribution
+plan.md
+docs-installation-draft.md
+# One-off plot script with measurements frozen in from a single machine.
+# The reproducible equivalent is `fftkit bench` and benchmarks/bench_backends.py.
+bench_plot.py

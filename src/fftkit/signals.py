@@ -1,8 +1,23 @@
+from __future__ import annotations
+
+import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 
-def generate_complex_signal(t, f1, f2, num_harmonics_f1=5, num_harmonics_f2=3,
-                            harmonic_decay_f1=0.5, harmonic_decay_f2=0.7,
-                            f1_amplitude=1.0, f2_amplitude=0.3, noise_level=0.15, *, seed=None):
+def generate_complex_signal(
+    t: ArrayLike,
+    f1: float,
+    f2: float,
+    num_harmonics_f1: int = 5,
+    num_harmonics_f2: int = 3,
+    harmonic_decay_f1: float = 0.5,
+    harmonic_decay_f2: float = 0.7,
+    f1_amplitude: float = 1.0,
+    f2_amplitude: float = 0.3,
+    noise_level: float = 0.15,
+    *,
+    seed: int | None = None,
+) -> NDArray[np.float64]:
     """
     Generate a quasiperiodic signal with two uncorrelated frequencies and their harmonics.
 
@@ -36,7 +51,8 @@ def generate_complex_signal(t, f1, f2, num_harmonics_f1=5, num_harmonics_f2=3,
     array-like
         The generated quasiperiodic signal
     """
-    import numpy as np
+    t = np.asarray(t)
+
     # Main frequency component (f1) with harmonics
     signal = f1_amplitude * np.sin(2 * np.pi * f1 * t)
     for i in range(2, num_harmonics_f1 + 1):

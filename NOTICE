@@ -1,0 +1,15 @@
+fftkit
+
+Copyright 2026 Ricardo A S Frantz
+
+This project was originally created by Ricardo A S Frantz.
+It is maintained by Ricardo A S Frantz.
+Project home: https://github.com/openfluids/fftkit
+Contact: rasfrantz@gmail.com
+
+fftkit was extracted from openmodalpy (https://github.com/openfluids/openmodalpy),
+which was named modalpy at the time of the extraction,
+also by Ricardo A S Frantz.
+
+Modifications and derivative works must preserve the applicable copyright,
+license, and notice text as required by Apache-2.0.

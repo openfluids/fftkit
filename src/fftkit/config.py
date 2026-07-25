@@ -6,7 +6,7 @@ This module handles detection and configuration of the FFT backend to use.
 import os
 
 
-def detect_backend():
+def detect_backend() -> str:
     """Auto-detect best available FFT backend.
 
     Checks for available FFT libraries in the following precedence:
@@ -48,4 +48,4 @@ def detect_backend():
 
 
 # Detect backend at module load time
-DEFAULT_BACKEND = detect_backend()
+DEFAULT_BACKEND: str = detect_backend()

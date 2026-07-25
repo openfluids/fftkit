@@ -4,6 +4,7 @@ import sys
 
 import numpy as np
 import pytest
+from conftest import all_backends_param
 
 import fftkit
 
@@ -57,7 +58,7 @@ class TestGetFFTFunc:
         with pytest.raises(ValueError, match="Unknown.*backend"):
             fftkit.get_fft_func('nonexistent-backend-xyz')
 
-    @pytest.mark.parametrize("backend", fftkit.get_available_backends())
+    @pytest.mark.parametrize("backend", all_backends_param())
     def test_get_fft_func_available_backends(self, backend):
         """All available backends should return working functions."""
         func = fftkit.get_fft_func(backend)
@@ -160,3 +161,115 @@ class TestBackendProperties:
         """mkl_available() should be callable and return bool."""
         result = fftkit.mkl_available()
         assert isinstance(result, (bool, np.bool_))
+
+
+class TestGetOptimalBackend:
+    """Test get_optimal_backend's workload-based selection heuristic."""
+
+    def test_small_array_no_mkl_no_gpu_returns_scipy(self, monkeypatch):
+        """Below the MKL size threshold, and with no GPU, must fall through
+        to the scipy default -- this is the only backend guaranteed present.
+        """
+        monkeypatch.setattr(fftkit.backends, "mkl_available", lambda: False)
+        monkeypatch.setattr(fftkit.backends, "gpu_available", lambda: False)
+        result = fftkit.get_optimal_backend(array_size=512, prefer_gpu=True)
+        assert result == 'scipy'
+
+    def test_large_array_with_mkl_returns_mkl(self, monkeypatch):
+        """array_size >= 1024 with MKL installed and no GPU should pick mkl."""
+        monkeypatch.setattr(fftkit.backends, "mkl_available", lambda: True)
+        monkeypatch.setattr(fftkit.backends, "gpu_available", lambda: False)
+        result = fftkit.get_optimal_backend(array_size=2048, prefer_gpu=True)
+        assert result == 'mkl'
+
+    def test_huge_transfer_array_with_gpu_returns_cupy(self, monkeypatch):
+        """array_size >= 256K with GPU available (non gpu_resident) should
+        prefer cupy despite transfer overhead, per the documented threshold.
+        """
+        monkeypatch.setattr(fftkit.backends, "gpu_available", lambda: True)
+        result = fftkit.get_optimal_backend(array_size=300_000, prefer_gpu=True, gpu_resident=False)
+        assert result == 'cupy'
+
+    def test_gpu_resident_large_batch_returns_cupy(self, monkeypatch):
+        """gpu_resident=True with batch_size >= BATCH_BREAKEVEN_RESIDENT (16)
+        should pick cupy even for a small per-FFT array_size.
+        """
+        monkeypatch.setattr(fftkit.backends, "gpu_available", lambda: True)
+        result = fftkit.get_optimal_backend(array_size=256, batch_size=32, prefer_gpu=True, gpu_resident=True)
+        assert result == 'cupy'
+
+    def test_prefer_gpu_false_never_returns_cupy(self, monkeypatch):
+        """prefer_gpu=False must never select a GPU backend, regardless of size."""
+        monkeypatch.setattr(fftkit.backends, "gpu_available", lambda: True)
+        monkeypatch.setattr(fftkit.backends, "mkl_available", lambda: False)
+        result = fftkit.get_optimal_backend(array_size=300_000, prefer_gpu=False)
+        assert result != 'cupy'
+
+
+class TestBenchmarkBackends:
+    """Test benchmark_backends() over the actually-available backends."""
+
+    def test_returns_dict_keyed_by_available_backends(self):
+        # Keep iterations tiny: this measures the *shape* of the result,
+        # not performance, so runtime should stay well under the suite's
+        # fast-suite budget.
+        results = fftkit.benchmark_backends(size=64, iterations=2)
+        assert isinstance(results, dict)
+        assert set(results.keys()) == set(fftkit.get_available_backends())
+
+    def test_timings_are_positive_floats(self):
+        results = fftkit.benchmark_backends(size=64, iterations=2)
+        for name, val in results.items():
+            # benchmark_backends() records a string "Error: ..." per-backend
+            # on failure instead of raising; on this machine (scipy+numpy
+            # only, both always working) every entry must be a positive
+            # float, not an error string.
+            assert isinstance(val, float), f"{name}: expected float timing, got {val!r}"
+            assert val > 0
+
+
+class TestRegisterMklScipyBackend:
+    """Test register_mkl_scipy_backend's honest success/failure return."""
+
+    def test_returns_false_when_mkl_unavailable(self):
+        """Without mkl_fft installed, must return False, not raise."""
+        try:
+            import mkl_fft  # noqa: F401
+            pytest.skip("mkl_fft is installed on this machine")
+        except ImportError:
+            pass
+        assert fftkit.register_mkl_scipy_backend() is False
+
+
+class TestSuiteNotSilentlyEmpty:
+    """Guard against the collection-time parametrize trap this suite used to
+    have: @pytest.mark.parametrize("backend", fftkit.get_available_backends())
+    silently drops to zero test cases for any backend not importable on the
+    machine running pytest, with no skip, no failure, nothing in the report.
+    Pin down that scipy and numpy -- always-available backends -- are
+    actually present and actually exercised, so a future regression back to
+    that pattern (which would still pass this exact assertion by accident
+    only if scipy/numpy happened to be probed) has at least one contract to
+    violate.
+    """
+
+    def test_scipy_and_numpy_always_available_and_exercised(self):
+        available = fftkit.get_available_backends()
+        assert "scipy" in available, "scipy must always be available"
+        assert "numpy" in available, "numpy must always be available"
+
+        # "exercised" = the registered callable actually runs and produces
+        # a correctly-shaped result, not merely that the name is listed.
+        x = np.array([1, 2, 3, 4], dtype=np.complex128)
+        for name in ("scipy", "numpy"):
+            result = fftkit.get_fft_func(name)(x)
+            assert len(result) == len(x), f"{name} backend did not run"
+
+    def test_all_backends_param_covers_full_registry(self):
+        """all_backends_param() must enumerate every registered backend name,
+        not just the available ones -- this is the whole point of the fix.
+        """
+        from conftest import all_backends_param
+
+        param_ids = {p.id for p in all_backends_param()}
+        assert param_ids == set(fftkit.get_backend_names())

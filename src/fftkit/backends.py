@@ -1,392 +1,473 @@
 """
 Shared FFT backend selection and wrapper utilities for FFT operations.
 
-=============================================================================
-INSTALLATION GUIDE FOR HIGH-PERFORMANCE FFT BACKENDS
-=============================================================================
+fftkit supports multiple FFT backends with different performance
+characteristics, each exposed through the same transform matrix:
+``fft, ifft, rfft, irfft, fft2, ifft2, fftn, ifftn`` at ``axis=-1``
+(NumPy/SciPy convention).
 
-This module supports multiple FFT backends with different performance characteristics.
-Below are installation instructions for each backend.
+Backends:
 
-1. SCIPY (Default) - No extra installation needed
-   - Included with scipy
-   - Good general-purpose performance
-   - pip install scipy
+- ``scipy``: default, always available
+- ``numpy``: fallback, always available
+- ``mkl``: Intel MKL via ``mkl_fft`` (2-20x faster than scipy for large FFTs)
+- ``pyfftw``: FFTW via ``pyfftw``
+- ``cupy``: NVIDIA GPU via ``cupy`` (host<->device transfer handled internally)
+- ``torch``: PyTorch (CPU or CUDA tensor, depending on install)
+- ``tensorflow``: TensorFlow ``tf.signal`` (partial transform matrix)
+- ``accelerate``: Apple Accelerate/vDSP via ctypes, macOS only
+  (1-D complex forward FFT, power-of-two lengths only)
 
-2. NUMPY - No extra installation needed
-   - Included with numpy
-   - Fallback option
+Optional backends are imported lazily, so ``import fftkit`` only requires
+numpy and scipy. Use ``get_available_backends()`` to see what actually works
+on this machine.
 
-3. INTEL MKL (Recommended for CPU) - 2-20x faster than scipy for large FFTs
-   Installation:
-       # Load Intel oneAPI environment first (if available)
-       source /opt/intel/oneapi/setvars.sh  # or use alias like 'int25'
+Environment variables:
 
-       # Install via uv (preferred)
-       uv pip install mkl_fft mkl-service \\
-           --index-url https://software.repos.intel.com/python/pypi \\
-           --extra-index-url https://pypi.org/simple
-
-       # Or via pip
-       pip install mkl_fft mkl-service \\
-           --index-url https://software.repos.intel.com/python/pypi \\
-           --extra-index-url https://pypi.org/simple
-
-   Verify:
-       python -c "import mkl_fft; print('MKL FFT OK')"
-
-   Performance (typical speedups vs scipy):
-       1K points:   ~2x faster
-       64K points:  ~5-6x faster
-       256K points: ~5x faster
-
-4. CUPY (GPU - NVIDIA CUDA) - Up to 100x faster for batch operations
-   Prerequisites:
-       # NVIDIA driver must be installed (check with: nvidia-smi)
-       # CUDA toolkit must be installed:
-       sudo apt install nvidia-cuda-toolkit  # Ubuntu/Debian
-       # or download from: https://developer.nvidia.com/cuda-downloads
-
-   Installation:
-       # For CUDA 12.x (check version with: nvcc --version)
-       uv pip install cupy-cuda12x
-
-       # For CUDA 11.x
-       uv pip install cupy-cuda11x
-
-   Verify:
-       python -c "import cupy as cp; x = cp.array([1,2,3]); print(f'CuPy OK, device: {cp.cuda.Device(0).id}')"
-
-   When to use GPU:
-       - Batch processing (64+ FFTs at once): GPU is much faster
-       - Large single FFTs (>64K points): GPU wins
-       - Small single FFTs (<4K): CPU is often faster due to transfer overhead
-
-5. PYTORCH (torch) - Good for ML pipelines
-   Installation:
-       pip install torch  # CPU only
-       pip install torch --index-url https://download.pytorch.org/whl/cu124  # CUDA 12.4
-
-6. TENSORFLOW - High overhead, use for TF pipelines only
-   Installation:
-       pip install tensorflow
-
-7. PYFFTW - FFTW wrapper (optional)
-   Installation:
-       pip install pyfftw
-
-8. ACCELERATE - macOS only (Apple Silicon optimized)
-   - Uses Apple's Accelerate framework via ctypes
-   - Only works on macOS
-
-=============================================================================
-ENVIRONMENT VARIABLES
-=============================================================================
-
-FFTKIT_BACKEND: Override default FFT backend (fftkit-specific, takes precedence)
-    export FFTKIT_BACKEND=mkl  # Use MKL by default
-
-PYMODAL_FFT_BACKEND: Override default FFT backend (legacy, for modalpy compatibility)
-    export PYMODAL_FFT_BACKEND=mkl  # Use MKL by default
-
-OMP_NUM_THREADS: Control OpenMP thread count for MKL
-    export OMP_NUM_THREADS=4
-
-MKL_NUM_THREADS: Control MKL-specific thread count
-    export MKL_NUM_THREADS=4
-
-=============================================================================
-QUICK BENCHMARK
-=============================================================================
-
-To compare backends on your system:
-
-    from fftkit.backends import benchmark_backends, get_available_backends
-    print(f"Available: {get_available_backends()}")
-    results = benchmark_backends(size=65536, iterations=50)
-    for name, time_ms in sorted(results.items(), key=lambda x: x[1] if isinstance(x[1], float) else 999):
-        print(f"  {name}: {time_ms:.3f} ms" if isinstance(time_ms, float) else f"  {name}: {time_ms}")
-
-=============================================================================
+``FFTKIT_BACKEND``: Override the default FFT backend (takes precedence)
+    export FFTKIT_BACKEND=mkl
 """
 
+from __future__ import annotations
+
+import importlib
 import sys
+import warnings
+from typing import Any, Callable
+
+import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 from .config import DEFAULT_BACKEND
+from .gpu import gpu_available as gpu_available  # re-exported for backwards compat
+
+TRANSFORM_NAMES = ("fft", "ifft", "rfft", "irfft", "fft2", "ifft2", "fftn", "ifftn")
+
+#: 1-D transforms whose default ``axis`` moved from 0 to -1 in 0.2.0.
+_AXIS_MOVED_TRANSFORMS = ("fft", "ifft", "rfft", "irfft")
 
 
-def accelerate_fft(x, axis=0):
-    """FFT using Apple's Accelerate framework via PyObjC or ctypes."""
-    import ctypes
-    import ctypes.util
+class AxisDefaultWarning(UserWarning):
+    """The default ``axis`` changed from 0 to -1 in fftkit 0.2.0.
 
-    import numpy as np
+    Raised when a multi-dimensional array reaches a 1-D transform without an
+    explicit ``axis``, because that is the only case where the change alters
+    results. Such a call transformed columns under 0.1.x and transforms rows
+    now, with no error either way -- a silently different answer, which is
+    the failure mode worth a warning.
 
-    if sys.platform != 'darwin':
-        raise NotImplementedError('Accelerate FFT is only available on macOS.')
+    Silence it by passing ``axis`` explicitly (the fix, not a workaround), or
+    globally::
 
-    lib_path = ctypes.util.find_library('Accelerate')
-    if lib_path is None:
-        raise RuntimeError('Accelerate framework not found.')
-    accel = ctypes.cdll.LoadLibrary(lib_path)
+        warnings.filterwarnings("ignore", category=fftkit.AxisDefaultWarning)
 
-    class DSPDoubleSplitComplex(ctypes.Structure):
-        _fields_ = [
-            ('realp', ctypes.POINTER(ctypes.c_double)),
-            ('imagp', ctypes.POINTER(ctypes.c_double)),
-        ]
-
-    x_arr = np.asarray(x, dtype=np.complex128)
-    n = x_arr.shape[axis]
-    log2n = int(np.log2(n))
-    if 2**log2n != n:
-        raise ValueError('vDSP FFT requires power-of-two length.')
-
-    real = np.ascontiguousarray(np.real(x_arr), dtype=np.float64)
-    imag = np.ascontiguousarray(np.imag(x_arr), dtype=np.float64)
-    split = DSPDoubleSplitComplex(real.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-                                  imag.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
-
-    accel.vDSP_create_fftsetupD.restype = ctypes.c_void_p
-    setup = accel.vDSP_create_fftsetupD(ctypes.c_uint(log2n), 2)
-    if not setup:
-        raise RuntimeError('Failed to create FFT setup.')
-    accel.vDSP_fft_zipD(ctypes.c_void_p(setup), ctypes.byref(split), 1, ctypes.c_uint(log2n), 1)
-    accel.vDSP_destroy_fftsetupD(ctypes.c_void_p(setup))
-    return real + 1j * imag
+    A UserWarning subclass rather than DeprecationWarning on purpose:
+    DeprecationWarning is hidden by default outside ``__main__``, so library
+    users -- exactly the people affected -- would never see it. Slated for
+    removal in 0.3.0.
+    """
 
 
-def scipy_fft(x, axis=0):
-    try:
-        from scipy.fft import fft
-    except ImportError:
-        from scipy.fftpack import fft
-    return fft(x, axis=axis)
+class _Unset:
+    """Sentinel distinguishing 'caller omitted axis' from 'caller passed -1'."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<unset>"
 
 
-def numpy_fft(x, axis=0):
-    from numpy.fft import fft
-
-    return fft(x, axis=axis)
+UNSET_AXIS: Any = _Unset()
 
 
-def tensorflow_fft(x, axis=0):
-    import tensorflow as tf
+def resolve_axis(x: ArrayLike, axis: Any, transform: str) -> int:
+    """Return the effective ``axis``, warning if the 0.2.0 default change bites.
 
-    x_tf = tf.convert_to_tensor(x)
-    x_tf_complex = tf.cast(x_tf, tf.complex64)
-    return tf.signal.fft(x_tf_complex).numpy()
+    Only warns when the caller omitted ``axis`` AND the input has more than one
+    dimension. A 1-D signal gives the same result for axis 0 and -1, so warning
+    there would be noise for the overwhelming majority of calls.
+    """
+    if not isinstance(axis, _Unset):
+        return int(axis)
+
+    if transform in _AXIS_MOVED_TRANSFORMS and np.ndim(x) > 1:
+        warnings.warn(
+            f"fftkit.{transform}() received a {np.ndim(x)}-D array without an explicit "
+            "'axis'. The default changed from axis=0 to axis=-1 in fftkit 0.2.0 to match "
+            "numpy and scipy, so this call now transforms the LAST axis where fftkit "
+            "0.1.x transformed the FIRST one. Pass axis=-1 to keep the new behaviour "
+            "(and silence this warning), or axis=0 to restore the old one.",
+            AxisDefaultWarning,
+            stacklevel=3,
+        )
+    return -1
+
+# Result of any registered transform. rfft/irfft can return real or complex
+# depending on direction, so this stays a plain ndarray of unspecified dtype.
+ArrayResult = NDArray[Any]
+
+# Call signature of a single registered transform. The transform matrix has
+# two genuinely different call conventions in practice -- 1-D transforms take
+# (x, n=None, axis=-1, norm=None), N-D transforms take (x, s=None, axes=None,
+# norm=None) -- and several backends (e.g. torch's 1-D wrappers) only accept
+# their own family's keywords, not both. A structural Protocol strict enough
+# to name every keyword would therefore reject some of the very callables it
+# needs to describe, so this alias fixes the shared leading positional
+# argument (``x``, the input array) and leaves the rest as keyword arguments,
+# rather than falling back to a bare, unparameterized ``Callable``.
+TransformFunc = Callable[..., ArrayResult]
 
 
-def torch_fft(x, axis=0):
-    import torch
+class Backend:
+    """Describes one FFT backend: its name and the transforms it implements.
 
-    x_torch = torch.from_numpy(x)
-    x_torch_complex = x_torch.type(torch.complex64)
-    return torch.fft.fft(x_torch_complex, dim=axis).numpy()
+    ``transforms`` maps a subset (or all) of ``TRANSFORM_NAMES`` to callables.
+    Transforms the backend does not support are simply absent; requesting one
+    via :meth:`get` raises a ``NotImplementedError`` naming the backend and
+    the transform.
+    """
+
+    def __init__(self, name: str, transforms: dict[str, TransformFunc]) -> None:
+        self.name = name
+        self.transforms = transforms
+
+    def supports(self, transform: str) -> bool:
+        return transform in self.transforms
+
+    def get(self, transform: str) -> TransformFunc:
+        try:
+            return self.transforms[transform]
+        except KeyError:
+            raise NotImplementedError(f"Backend '{self.name}' does not implement '{transform}'.") from None
+
+    def __call__(self, transform: str, *args: Any, **kwargs: Any) -> ArrayResult:
+        return self.get(transform)(*args, **kwargs)
 
 
-def _pyfftw_fft_impl(x, axis=0):
-    import numpy as np
+def _lazy_module_backend(
+    name: str,
+    module_path: str,
+    transforms: tuple[str, ...] = TRANSFORM_NAMES,
+    setup: Callable[[Any], None] | None = None,
+) -> Backend:
+    """Build a Backend that imports ``module_path`` lazily and delegates directly.
+
+    Works for any namespace that already implements the NumPy/SciPy FFT
+    calling convention: ``scipy.fft``, ``numpy.fft``, ``mkl_fft.interfaces.numpy_fft``,
+    ``pyfftw.interfaces.numpy_fft``.
+
+    ``setup``, if given, runs once with the imported module the first time any
+    transform on this backend is called. It exists for namespaces whose defaults
+    suit one-shot scripts rather than a library: see ``_pyfftw_setup``.
+    """
+    done = False
+
+    def _make(transform: str) -> TransformFunc:
+        def fn(*args: Any, **kwargs: Any) -> ArrayResult:
+            nonlocal done
+            module = importlib.import_module(module_path)
+            if setup is not None and not done:
+                setup(module)
+                done = True
+            func = getattr(module, transform, None)
+            if func is None:
+                raise NotImplementedError(f"Backend '{name}' does not implement '{transform}'.")
+            result: ArrayResult = func(*args, **kwargs)
+            return result
+
+        return fn
+
+    return Backend(name, {t: _make(t) for t in transforms})
+
+
+def _pyfftw_setup(module: Any) -> None:
+    """Enable pyfftw's plan cache.
+
+    ``pyfftw.interfaces`` ships with its cache DISABLED, so every call re-plans
+    the transform from scratch. FFTW's advantage is an expensive plan amortised
+    over many transforms, which is exactly the library case, so re-planning
+    per call gives away the reason to use it at all.
+
+    Measured on an AMD Ryzen 9 9900X, ms/FFT, cache off -> on:
+
+        N=1024     0.540 -> 0.216
+        N=65536    6.527 -> 2.846
+        N=262144  18.560 -> 11.238
+
+    At 65536 and above this moves pyfftw from slowest of four backends to
+    second only to MKL. At N=1024 it remains the slowest even cached (numpy
+    0.177) -- per-call overhead still dominates a transform that small, so
+    the cache narrows the gap rather than closing it.
+    """
     import pyfftw
 
-    # Match dtype: if float64 or complex128, use complex128; else use complex64
-    if np.issubdtype(x.dtype, np.floating):
-        dtype = np.complex128 if x.dtype == np.float64 else np.complex64
-        x = x.astype(dtype)
-    elif x.dtype == np.complex128 or x.dtype == np.complex64:
-        dtype = x.dtype
-    else:
-        dtype = np.complex64
-        x = x.astype(dtype)
-    a = pyfftw.empty_aligned(x.shape, dtype=dtype)
-    a[:] = x
-    fft_object = pyfftw.builders.fft(a, axis=axis)
-    return fft_object()
+    if not pyfftw.interfaces.cache.is_enabled():
+        pyfftw.interfaces.cache.enable()
 
 
-def mkl_fft_transform(x, axis=0):
-    """FFT via Intel MKL (2-20x faster for large arrays).
+def _cupy_backend() -> Backend:
+    """Backend wrapping cupy.fft with automatic host<->device transfer."""
+    name = "cupy"
 
-    Requires mkl_fft package. Install with:
-        uv pip install mkl_fft --index-url https://software.repos.intel.com/python/pypi
+    def _make(transform: str) -> TransformFunc:
+        def fn(x: ArrayLike, *args: Any, **kwargs: Any) -> ArrayResult:
+            import cupy as cp
+
+            func = getattr(cp.fft, transform, None)
+            if func is None:
+                raise NotImplementedError(f"Backend '{name}' does not implement '{transform}'.")
+            x_gpu = cp.asarray(x)
+            result_gpu = func(x_gpu, *args, **kwargs)
+            result: ArrayResult = cp.asnumpy(result_gpu)
+            return result
+
+        return fn
+
+    return Backend(name, {t: _make(t) for t in TRANSFORM_NAMES})
+
+
+def _torch_backend() -> Backend:
+    """Backend wrapping torch.fft: axis/axes -> dim, numpy in / numpy out.
+
+    torch.fft preserves input precision (float64/complex128 in -> complex128
+    out, float32/complex64 in -> complex64 out), so no explicit casting is
+    needed here.
     """
-    try:
-        from mkl_fft import fft as mkl_fft_func
-    except ImportError as e:
-        raise ImportError(
-            "mkl_fft not installed. Install with:\n"
-            "uv pip install mkl_fft --index-url https://software.repos.intel.com/python/pypi "
-            "--extra-index-url https://pypi.org/simple"
-        ) from e
-    return mkl_fft_func(x, axis=axis)
+    name = "torch"
+
+    def _make_1d(transform: str) -> TransformFunc:
+        def fn(x: ArrayLike, n: int | None = None, axis: int = -1, norm: str | None = None) -> ArrayResult:
+            import torch
+
+            func = getattr(torch.fft, transform, None)
+            if func is None:
+                raise NotImplementedError(f"Backend '{name}' does not implement '{transform}'.")
+            x_t = torch.from_numpy(np.asarray(x))
+            result = func(x_t, n=n, dim=axis, norm=norm)
+            arr: ArrayResult = result.numpy()
+            return arr
+
+        return fn
+
+    def _make_nd(
+        transform: str,
+    ) -> TransformFunc:
+        def fn(
+            x: ArrayLike, s: tuple[int, ...] | None = None, axes: tuple[int, ...] | None = None,
+            norm: str | None = None,
+        ) -> ArrayResult:
+            import torch
+
+            func = getattr(torch.fft, transform, None)
+            if func is None:
+                raise NotImplementedError(f"Backend '{name}' does not implement '{transform}'.")
+            x_t = torch.from_numpy(np.asarray(x))
+            result = func(x_t, s=s, dim=axes, norm=norm)
+            arr: ArrayResult = result.numpy()
+            return arr
+
+        return fn
+
+    funcs = {t: _make_1d(t) for t in ("fft", "ifft", "rfft", "irfft")}
+    funcs.update({t: _make_nd(t) for t in ("fft2", "ifft2", "fftn", "ifftn")})
+    return Backend(name, funcs)
 
 
-def register_mkl_scipy_backend():
-    """Set MKL as the global scipy.fft backend for all scipy.fft calls.
+def _tensorflow_backend() -> Backend:
+    """Backend wrapping tf.signal: partial matrix, last-axis/last-2-axes only.
 
-    After calling this, all scipy.fft operations will use MKL automatically.
+    tf.signal has no ``axis``/``norm`` keyword; it always transforms the
+    innermost dimension(s). We move the requested axis(es) to the end,
+    transform, and move them back. ``norm`` other than the default
+    ('backward') is not supported by tf.signal and raises NotImplementedError.
+    tf.signal has no general n-dimensional transform, so fftn/ifftn are
+    intentionally left unimplemented.
     """
-    try:
-        import mkl_fft.interfaces.scipy_fft
-        from scipy.fft import set_global_backend
-        set_global_backend(mkl_fft.interfaces.scipy_fft)
-        return True
-    except ImportError:
-        return False
+    name = "tensorflow"
+
+    def _check_norm(norm: str | None) -> None:
+        if norm not in (None, "backward"):
+            raise NotImplementedError(f"Backend '{name}' does not support norm={norm!r}.")
+
+    def _make_1d(tf_name: str) -> TransformFunc:
+        def fn(x: ArrayLike, n: int | None = None, axis: int = -1, norm: str | None = None) -> ArrayResult:
+            import tensorflow as tf
+
+            _check_norm(norm)
+            x_tf = tf.convert_to_tensor(x)
+            x_tf = tf.experimental.numpy.moveaxis(x_tf, axis, -1)
+            if n is not None:
+                func = getattr(tf.signal, tf_name)
+                result = func(x_tf, fft_length=[n]) if tf_name in ("rfft", "irfft") else func(x_tf)
+            else:
+                func = getattr(tf.signal, tf_name)
+                result = func(x_tf)
+            result = tf.experimental.numpy.moveaxis(result, -1, axis)
+            arr: ArrayResult = result.numpy()
+            return arr
+
+        return fn
+
+    def _make_2d(tf_name: str) -> TransformFunc:
+        def fn(
+            x: ArrayLike, s: tuple[int, ...] | None = None, axes: tuple[int, ...] | None = None,
+            norm: str | None = None,
+        ) -> ArrayResult:
+            import tensorflow as tf
+
+            _check_norm(norm)
+            resolved_axes = (-2, -1) if axes is None else tuple(axes)
+            x_tf = tf.convert_to_tensor(x)
+            x_tf = tf.experimental.numpy.moveaxis(x_tf, resolved_axes, (-2, -1))
+            func = getattr(tf.signal, tf_name)
+            result = func(x_tf, fft_length=s) if tf_name in ("rfft2d", "irfft2d") else func(x_tf)
+            result = tf.experimental.numpy.moveaxis(result, (-2, -1), resolved_axes)
+            arr: ArrayResult = result.numpy()
+            return arr
+
+        return fn
+
+    funcs = {
+        "fft": _make_1d("fft"),
+        "ifft": _make_1d("ifft"),
+        "rfft": _make_1d("rfft"),
+        "irfft": _make_1d("irfft"),
+        "fft2": _make_2d("fft2d"),
+        "ifft2": _make_2d("ifft2d"),
+    }
+    return Backend(name, funcs)
 
 
-# =============================================================================
-# GPU Backends (CuPy / PyTorch CUDA)
-# =============================================================================
+def _accelerate_backend() -> Backend:
+    """Backend wrapping Apple's Accelerate/vDSP framework via ctypes.
 
-def cupy_fft(x, axis=0):
-    """FFT using NVIDIA GPU via CuPy (auto-transfer mode).
-
-    Accepts numpy array, transfers to GPU, computes FFT, returns numpy array.
-    For batch operations or pipelines, use cupy_fft_gpu_resident() instead.
-
-    Requires: pip install cupy-cuda12x (for CUDA 12.x)
+    Only a 1-D complex forward FFT of power-of-two length is implemented;
+    every other transform raises NotImplementedError.
     """
-    try:
-        import cupy as cp
-    except ImportError as e:
-        raise ImportError(
-            "CuPy not installed. Install with:\n"
-            "uv pip install cupy-cuda12x"
-        ) from e
+    name = "accelerate"
 
-    # Transfer to GPU if numpy array
-    if not isinstance(x, cp.ndarray):
-        x_gpu = cp.asarray(x)
-    else:
-        x_gpu = x
+    def _fft(x: ArrayLike, n: int | None = None, axis: int = -1, norm: str | None = None) -> ArrayResult:
+        import ctypes
+        import ctypes.util
 
-    # Compute FFT on GPU
-    result_gpu = cp.fft.fft(x_gpu, axis=axis)
+        if sys.platform != "darwin":
+            raise NotImplementedError("Accelerate FFT is only available on macOS.")
+        if n is not None:
+            raise NotImplementedError("Backend 'accelerate' does not support n= padding/truncation.")
+        if norm not in (None, "backward"):
+            raise NotImplementedError(f"Backend 'accelerate' does not support norm={norm!r}.")
 
-    # Transfer back to CPU as numpy
-    return cp.asnumpy(result_gpu)
+        lib_path = ctypes.util.find_library("Accelerate")
+        if lib_path is None:
+            raise RuntimeError("Accelerate framework not found.")
+        accel = ctypes.cdll.LoadLibrary(lib_path)
 
+        class DSPDoubleSplitComplex(ctypes.Structure):
+            _fields_ = [
+                ("realp", ctypes.POINTER(ctypes.c_double)),
+                ("imagp", ctypes.POINTER(ctypes.c_double)),
+            ]
 
-def cupy_fft_gpu_resident(x_gpu, axis=0):
-    """FFT for data already on GPU (no transfer overhead).
+        x_arr = np.asarray(x, dtype=np.complex128)
+        length = x_arr.shape[axis]
+        log2n = int(np.log2(length))
+        if 2**log2n != length:
+            raise ValueError("vDSP FFT requires power-of-two length.")
 
-    Args:
-        x_gpu: CuPy array (must already be on GPU)
-        axis: Axis along which to compute FFT
+        real = np.ascontiguousarray(np.real(x_arr), dtype=np.float64)
+        imag = np.ascontiguousarray(np.imag(x_arr), dtype=np.float64)
+        split = DSPDoubleSplitComplex(
+            real.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            imag.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        )
 
-    Returns:
-        CuPy array (stays on GPU)
-    """
-    import cupy as cp
-    if not isinstance(x_gpu, cp.ndarray):
-        raise TypeError("Input must be a CuPy array. Use cupy_fft() for numpy arrays.")
-    return cp.fft.fft(x_gpu, axis=axis)
+        accel.vDSP_create_fftsetupD.restype = ctypes.c_void_p
+        setup = accel.vDSP_create_fftsetupD(ctypes.c_uint(log2n), 2)
+        if not setup:
+            raise RuntimeError("Failed to create FFT setup.")
+        accel.vDSP_fft_zipD(ctypes.c_void_p(setup), ctypes.byref(split), 1, ctypes.c_uint(log2n), 1)
+        accel.vDSP_destroy_fftsetupD(ctypes.c_void_p(setup))
+        return real + 1j * imag
 
-
-def cupy_rfft(x, axis=0):
-    """Real FFT using NVIDIA GPU via CuPy (more efficient for real data)."""
-    try:
-        import cupy as cp
-    except ImportError as e:
-        raise ImportError("CuPy not installed. Install with: uv pip install cupy-cuda12x") from e
-
-    if not isinstance(x, cp.ndarray):
-        x_gpu = cp.asarray(x)
-    else:
-        x_gpu = x
-
-    result_gpu = cp.fft.rfft(x_gpu, axis=axis)
-    return cp.asnumpy(result_gpu)
-
-
-def torch_cuda_fft(x, axis=0):
-    """FFT using PyTorch on CUDA GPU.
-
-    Useful when integrating with PyTorch deep learning pipelines.
-    """
-    import torch
-
-    if not isinstance(x, torch.Tensor):
-        x_torch = torch.from_numpy(x).to('cuda')
-    else:
-        x_torch = x.to('cuda') if not x.is_cuda else x
-
-    result = torch.fft.fft(x_torch, dim=axis)
-    return result.cpu().numpy()
+    return Backend(name, {"fft": _fft})
 
 
 # =============================================================================
 # Backend Registry
 # =============================================================================
+# All backends are registered unconditionally; availability probing (not
+# registration) decides what can actually run on this machine.
 
-FFT_BACKENDS = {
-    # CPU backends
-    'scipy': scipy_fft,
-    'numpy': numpy_fft,
-    'mkl': mkl_fft_transform,
-    'accelerate': accelerate_fft,
-    # GPU backends
-    'cupy': cupy_fft,
-    'torch': torch_fft,
-    'torch_cuda': torch_cuda_fft,
-    'tensorflow': tensorflow_fft,
+BACKENDS: dict[str, Backend] = {
+    "scipy": _lazy_module_backend("scipy", "scipy.fft"),
+    "numpy": _lazy_module_backend("numpy", "numpy.fft"),
+    "mkl": _lazy_module_backend("mkl", "mkl_fft.interfaces.numpy_fft"),
+    "pyfftw": _lazy_module_backend("pyfftw", "pyfftw.interfaces.numpy_fft", setup=_pyfftw_setup),
+    "cupy": _cupy_backend(),
+    "torch": _torch_backend(),
+    "tensorflow": _tensorflow_backend(),
+    "accelerate": _accelerate_backend(),
 }
 
-# Optionally enable PyFFTW if available
-try:
-    import pyfftw  # noqa: F401
-    FFT_BACKENDS["pyfftw"] = _pyfftw_fft_impl
-except ImportError:
-    pass
+# Cache of probe results for get_available_backends(); populated on first call.
+_available_backends_cache: list[str] | None = None
 
 
 # =============================================================================
 # Backend Selection Utilities
 # =============================================================================
 
-def get_fft_func(backend=None):
-    """Get FFT function for specified backend."""
+def get_fft_func(backend: str | None = None) -> TransformFunc:
+    """Get the forward complex FFT function (axis=-1) for the specified backend.
+
+    The returned callable carries the same axis-migration guard as
+    ``fftkit.fft``: this is the 0.1.x idiom (``get_fft_func('scipy')(x)``), so
+    it is the path most likely to be holding a 2-D array that used to be
+    transformed along axis 0. See :class:`AxisDefaultWarning`.
+    """
     backend = backend or DEFAULT_BACKEND
-    if backend not in FFT_BACKENDS:
-        raise ValueError(f"Unknown FFT backend: {backend}. Available: {list(FFT_BACKENDS.keys())}")
-    return FFT_BACKENDS[backend]
+    if backend not in BACKENDS:
+        raise ValueError(f"Unknown FFT backend: {backend}. Available: {list(BACKENDS.keys())}")
+    inner = BACKENDS[backend].get("fft")
+
+    def fft_with_axis_guard(x: ArrayLike, *args: Any, **kwargs: Any) -> ArrayResult:
+        if not args and "axis" not in kwargs:
+            kwargs["axis"] = resolve_axis(x, UNSET_AXIS, "fft")
+        return inner(x, *args, **kwargs)
+
+    return fft_with_axis_guard
 
 
-def get_backend_names():
+def get_backend_names() -> list[str]:
     """Return list of all registered backend names."""
-    return list(FFT_BACKENDS.keys())
+    return list(BACKENDS.keys())
 
 
-def get_available_backends():
-    """Return list of backends that are actually importable/working."""
-    import numpy as np
+def get_available_backends(refresh: bool = False) -> list[str]:
+    """Return list of backends that are actually importable/working.
+
+    Results are cached at module level after the first call; pass
+    ``refresh=True`` to re-probe (e.g. after installing a new backend).
+    """
+    global _available_backends_cache
+    if _available_backends_cache is not None and not refresh:
+        return _available_backends_cache
+
     available = []
     test_signal = np.array([1, 2, 3, 4], dtype=np.complex128)
 
-    for name in FFT_BACKENDS.keys():
+    for name, backend in BACKENDS.items():
         try:
-            func = FFT_BACKENDS[name]
+            func = backend.get("fft")
             result = func(test_signal)
             if result is not None and len(result) == len(test_signal):
                 available.append(name)
         except Exception:
             pass
+
+    _available_backends_cache = available
     return available
 
 
-def gpu_available():
-    """Check if CUDA GPU is available for CuPy."""
-    try:
-        import cupy as cp
-        cp.cuda.Device(0).compute_capability
-        return True
-    except Exception:
-        return False
-
-
-def mkl_available():
+def mkl_available() -> bool:
     """Check if Intel MKL FFT is available."""
     try:
         import mkl_fft  # noqa: F401
@@ -395,7 +476,8 @@ def mkl_available():
         return False
 
 
-def get_optimal_backend(array_size, batch_size=1, prefer_gpu=True, gpu_resident=False):
+def get_optimal_backend(array_size: int, batch_size: int = 1, prefer_gpu: bool = True,
+                         gpu_resident: bool = False) -> str:
     """Select optimal backend based on workload characteristics.
 
     Args:
@@ -433,21 +515,19 @@ def get_optimal_backend(array_size, batch_size=1, prefer_gpu=True, gpu_resident=
     return 'scipy'
 
 
-def benchmark_backends(size=8192, iterations=100):
+def benchmark_backends(size: int = 8192, iterations: int = 100) -> dict[str, float | str]:
     """Quick benchmark of available backends.
 
     Returns dict of {backend_name: time_per_fft_ms}
     """
     import time
 
-    import numpy as np
-
-    results = {}
+    results: dict[str, float | str] = {}
     test_signal = np.random.randn(size) + 1j * np.random.randn(size)
 
     for name in get_available_backends():
         try:
-            func = FFT_BACKENDS[name]
+            func = BACKENDS[name].get("fft")
             # Warmup
             func(test_signal)
 
@@ -461,6 +541,68 @@ def benchmark_backends(size=8192, iterations=100):
             results[name] = f"Error: {e}"
 
     return results
+
+
+# =============================================================================
+# Backwards-compatible standalone shims (0.1.0 API)
+# =============================================================================
+
+def accelerate_fft(x: ArrayLike, axis: int = -1) -> ArrayResult:
+    return BACKENDS["accelerate"].get("fft")(x, axis=axis)
+
+
+def scipy_fft(x: ArrayLike, axis: int = -1) -> ArrayResult:
+    return BACKENDS["scipy"].get("fft")(x, axis=axis)
+
+
+def numpy_fft(x: ArrayLike, axis: int = -1) -> ArrayResult:
+    return BACKENDS["numpy"].get("fft")(x, axis=axis)
+
+
+def mkl_fft_transform(x: ArrayLike, axis: int = -1) -> ArrayResult:
+    """FFT via Intel MKL (2-20x faster for large arrays).
+
+    Requires mkl_fft package. Install with:
+        uv pip install mkl_fft --index-url https://software.repos.intel.com/python/pypi
+    """
+    try:
+        return BACKENDS["mkl"].get("fft")(x, axis=axis)
+    except ModuleNotFoundError as e:
+        raise ImportError(
+            "mkl_fft not installed. Install with:\n"
+            "uv pip install mkl_fft --index-url https://software.repos.intel.com/python/pypi "
+            "--extra-index-url https://pypi.org/simple"
+        ) from e
+
+
+def cupy_fft(x: ArrayLike, axis: int = -1) -> ArrayResult:
+    """FFT using NVIDIA GPU via CuPy (auto-transfer mode).
+
+    Accepts numpy array, transfers to GPU, computes FFT, returns numpy array.
+
+    Requires: pip install cupy-cuda12x (for CUDA 12.x)
+    """
+    try:
+        return BACKENDS["cupy"].get("fft")(x, axis=axis)
+    except ModuleNotFoundError as e:
+        raise ImportError(
+            "CuPy not installed. Install with:\n"
+            "uv pip install cupy-cuda12x"
+        ) from e
+
+
+def register_mkl_scipy_backend() -> bool:
+    """Set MKL as the global scipy.fft backend for all scipy.fft calls.
+
+    After calling this, all scipy.fft operations will use MKL automatically.
+    """
+    try:
+        import mkl_fft.interfaces.scipy_fft
+        from scipy.fft import set_global_backend
+        set_global_backend(mkl_fft.interfaces.scipy_fft)
+        return True
+    except ImportError:
+        return False
 
 
 if __name__ == '__main__':

@@ -1,5 +1,7 @@
 """Test GPU-accelerated FFT functions."""
 
+import sys
+
 import numpy as np
 import pytest
 
@@ -21,6 +23,24 @@ class TestGPUAvailability:
         # Should have at least an 'available' key
         assert 'available' in info
 
+    def test_get_gpu_info_shape_matches_availability(self):
+        """get_gpu_info()'s key set is a strict function of gpu_available():
+        the success shape (device_id/compute_capability/memory_*) when a
+        GPU is present, the failure shape ('error') when it is not -- never
+        a mix of both.
+        """
+        info = fftkit.get_gpu_info()
+        if fftkit.gpu_available():
+            assert info['available'] is True
+            for key in ('device_id', 'compute_capability', 'memory_total_gb', 'memory_free_gb'):
+                assert key in info
+            assert info['memory_total_gb'] > 0
+            assert 0 <= info['memory_free_gb'] <= info['memory_total_gb']
+        else:
+            assert info['available'] is False
+            assert 'error' in info
+            assert isinstance(info['error'], str)
+
     def test_should_use_gpu_returns_bool(self):
         """should_use_gpu() should return a boolean."""
         result = fftkit.should_use_gpu(array_size=1024, batch_size=1)
@@ -35,6 +55,35 @@ class TestGPUAvailability:
         else:
             # GPU not available: should return False
             assert result is False
+
+
+class TestAccelerateFFTPowerOfTwoGuard:
+    """accelerate_fft's vDSP path requires power-of-two length; only
+    reachable on macOS with the Accelerate framework actually linkable, so
+    these are environment-gated rather than GPU-gated. On this Linux CI/dev
+    box they SKIP (visible, named skips) rather than silently vanish.
+    """
+
+    @pytest.mark.skipif(
+        sys.platform != "darwin",
+        reason="Accelerate/vDSP FFT is macOS-only"
+    )
+    def test_non_power_of_two_length_raises_value_error(self):
+        import fftkit.backends as backends
+        x = np.arange(100, dtype=np.complex128)  # 100 is not a power of two
+        with pytest.raises(ValueError, match="power-of-two"):
+            backends.accelerate_fft(x)
+
+    @pytest.mark.skipif(
+        sys.platform != "darwin",
+        reason="Accelerate/vDSP FFT is macOS-only"
+    )
+    def test_power_of_two_length_matches_numpy(self):
+        import fftkit.backends as backends
+        np.random.seed(0)
+        x = np.random.randn(64) + 1j * np.random.randn(64)
+        result = backends.accelerate_fft(x)
+        assert np.allclose(result, np.fft.fft(x), rtol=1e-6, atol=1e-9)
 
 
 class TestGPUFFTFunctions:
@@ -129,23 +178,96 @@ class TestGPUBatchFFT:
         assert result.shape[1] == batch.shape[1] // 2 + 1  # rfft output length
 
 
+class TestGPUBatchFFTCPUFallback:
+    """Test the CPU-fallback path of fft_batch/rfft_batch when no GPU is
+    available. Runs (not skipped) precisely on machines without a GPU --
+    i.e. this CI/dev box -- which is the only place this path is exercised.
+    """
+
+    @pytest.mark.skipif(
+        fftkit.gpu_available(),
+        reason="fallback path only triggers when GPU is unavailable"
+    )
+    def test_fft_batch_fallback_warns_and_matches_scipy(self):
+        """fallback=True (default): emits RuntimeWarning and result matches
+        scipy.fft.fft on CPU, since that is exactly what the fallback calls.
+        """
+        np.random.seed(42)
+        data = np.random.randn(4, 64) + 1j * np.random.randn(4, 64)
+        processor = fftkit.GPUBatchFFT()
+        assert processor.available is False
+
+        with pytest.warns(RuntimeWarning, match="falling back to scipy.fft.fft"):
+            result = processor.fft_batch(data, axis=1)
+
+        from scipy.fft import fft as scipy_fft
+        assert np.allclose(result, scipy_fft(data, axis=1))
+
+    @pytest.mark.skipif(
+        fftkit.gpu_available(),
+        reason="fallback path only triggers when GPU is unavailable"
+    )
+    def test_rfft_batch_fallback_warns_and_matches_scipy(self):
+        np.random.seed(42)
+        data = np.random.randn(4, 64)
+        processor = fftkit.GPUBatchFFT()
+
+        with pytest.warns(RuntimeWarning, match="falling back to scipy.fft.rfft"):
+            result = processor.rfft_batch(data, axis=1)
+
+        from scipy.fft import rfft as scipy_rfft
+        assert np.allclose(result, scipy_rfft(data, axis=1))
+
+    @pytest.mark.skipif(
+        fftkit.gpu_available(),
+        reason="fallback path only triggers when GPU is unavailable"
+    )
+    def test_fft_batch_fallback_false_raises(self):
+        """fallback=False must hard-fail instead of silently running on CPU."""
+        data = np.random.randn(4, 64) + 1j * np.random.randn(4, 64)
+        processor = fftkit.GPUBatchFFT()
+        with pytest.raises(RuntimeError, match="GPU not available"):
+            processor.fft_batch(data, axis=1, fallback=False)
+
+    @pytest.mark.skipif(
+        fftkit.gpu_available(),
+        reason="fallback path only triggers when GPU is unavailable"
+    )
+    def test_rfft_batch_fallback_false_raises(self):
+        data = np.random.randn(4, 64)
+        processor = fftkit.GPUBatchFFT()
+        with pytest.raises(RuntimeError, match="GPU not available"):
+            processor.rfft_batch(data, axis=1, fallback=False)
+
+
 class TestGPUConfig:
     """Test GPU configuration constants."""
 
     def test_gpu_config_constants_exist(self):
-        """GPUConfig should have expected constants."""
-        assert hasattr(fftkit.GPUConfig, 'VRAM_TOTAL')
-        assert hasattr(fftkit.GPUConfig, 'VRAM_LIMIT')
+        """GPUConfig should have the device-neutral constants that replaced
+        the old hardcoded VRAM_TOTAL/VRAM_LIMIT in 0.2.0 (this module is no
+        longer tuned to one specific GPU's VRAM capacity).
+        """
+        assert hasattr(fftkit.GPUConfig, 'VRAM_FRACTION')
+        assert hasattr(fftkit.GPUConfig, 'VRAM_LIMIT_FALLBACK')
         assert hasattr(fftkit.GPUConfig, 'BATCH_BREAKEVEN_RESIDENT')
         assert hasattr(fftkit.GPUConfig, 'SIZE_BREAKEVEN_RESIDENT')
+        assert callable(fftkit.GPUConfig.default_vram_limit)
 
     def test_gpu_config_constants_reasonable(self):
         """GPUConfig values should be reasonable."""
-        assert fftkit.GPUConfig.VRAM_TOTAL > 0
-        assert fftkit.GPUConfig.VRAM_LIMIT > 0
-        assert fftkit.GPUConfig.VRAM_LIMIT <= fftkit.GPUConfig.VRAM_TOTAL
+        assert 0 < fftkit.GPUConfig.VRAM_FRACTION <= 1.0, \
+            "VRAM_FRACTION is a fraction of free VRAM, must be in (0, 1]"
+        assert fftkit.GPUConfig.VRAM_LIMIT_FALLBACK > 0
         assert fftkit.GPUConfig.BATCH_BREAKEVEN_RESIDENT > 0
         assert fftkit.GPUConfig.SIZE_BREAKEVEN_RESIDENT > 0
+
+    def test_default_vram_limit_no_gpu_returns_fallback(self):
+        """default_vram_limit() falls back to VRAM_LIMIT_FALLBACK when no
+        CUDA device can be queried (no cupy installed / no GPU present)."""
+        if fftkit.gpu_available():
+            pytest.skip("GPU available; fallback path not exercised here")
+        assert fftkit.GPUConfig.default_vram_limit() == fftkit.GPUConfig.VRAM_LIMIT_FALLBACK
 
 
 class TestBenchmarkCPUVsGPU:

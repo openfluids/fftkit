@@ -12,6 +12,7 @@ All tests assume unnormalized FFT: X[k] = sum(x[n] * exp(-2j*pi*k*n/N))
 
 import numpy as np
 import pytest
+from conftest import all_backends_param
 from scipy.fft import ifft
 from scipy.fft import rfft as scipy_rfft
 
@@ -50,7 +51,7 @@ def sine_wave():
 class TestNormalization:
     """Test FFT amplitude normalization (unnormalized convention)."""
 
-    @pytest.mark.parametrize("backend", fftkit.get_available_backends())
+    @pytest.mark.parametrize("backend", all_backends_param())
     def test_pure_sine_peak(self, sine_wave, backend):
         """Verify FFT peak matches theory for pure sine."""
         x, N = sine_wave
@@ -71,7 +72,7 @@ class TestNormalization:
 class TestParseval:
     """Test Parseval's theorem (energy conservation)."""
 
-    @pytest.mark.parametrize("backend", fftkit.get_available_backends())
+    @pytest.mark.parametrize("backend", all_backends_param())
     def test_parseval_complex_fft(self, sine_wave, backend):
         """Verify sum(|x|^2) = (1/N) * sum(|X|^2)."""
         x, N = sine_wave
@@ -110,7 +111,7 @@ class TestParseval:
 class TestInverseRoundTrip:
     """Test ifft(fft(x)) recovery."""
 
-    @pytest.mark.parametrize("backend", fftkit.get_available_backends())
+    @pytest.mark.parametrize("backend", all_backends_param())
     def test_ifft_consistency(self, sine_wave, backend):
         """Verify ifft(fft(x)) recovers original signal."""
         x, N = sine_wave
@@ -125,7 +126,7 @@ class TestInverseRoundTrip:
 class TestCrossBackendAgreement:
     """Test agreement across backends."""
 
-    @pytest.mark.parametrize("backend", fftkit.get_available_backends())
+    @pytest.mark.parametrize("backend", all_backends_param())
     def test_agreement_with_numpy(self, sine_wave, backend):
         """Verify backend agrees with numpy FFT to float64 precision.
 
@@ -172,7 +173,7 @@ class TestRandomSignalInvariants:
         x = np.random.randn(N) + 1j * np.random.randn(N)
         return x
 
-    @pytest.mark.parametrize("backend", fftkit.get_available_backends())
+    @pytest.mark.parametrize("backend", all_backends_param())
     def test_parseval_random(self, random_signal, backend):
         """Parseval on random complex signal."""
         x = random_signal

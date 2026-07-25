@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fftkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "One FFT API over many backends: scipy, numpy, Intel MKL, CuPy, PyTorch, TensorFlow, pyFFTW, Accelerate"
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 authors = [
     { name = "Ricardo Frantz", email = "rasfrantz@gmail.com" },
@@ -27,7 +27,6 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -50,9 +49,25 @@ Issues = "https://github.com/openfluids/fftkit/issues"
 # Optional accelerators. Every backend is probed at import time and degrades
 # to "unavailable" rather than failing, so none of these are required.
 mkl = ["mkl_fft"]
-gpu = ["cupy", "torch"]
+pyfftw = ["pyfftw"]
+tensorflow = ["tensorflow"]
+torch = ["torch"]
+# Plain "cupy" on PyPI is a source-only sdist that triggers a full local CUDA
+# toolkit compile on install. Use the prebuilt wheel matching your CUDA major
+# version instead.
+cuda12 = ["cupy-cuda12x"]
+cuda11 = ["cupy-cuda11x"]
+# Alias for the cuda12 wheel set, kept for a short, memorable install command.
+gpu = ["cupy-cuda12x"]
+# CPU-installable backends only; the cuda* extras are hardware-specific and
+# would fail to install (or install the wrong CUDA major) on a machine
+# without a matching GPU/toolkit, so they are deliberately excluded here.
+all = ["mkl_fft", "pyfftw", "torch"]
 # benchmarks/ only - never imported by the library itself.
 bench = ["matplotlib>=3.7", "tabulate>=0.9"]
+
+[project.scripts]
+fftkit = "fftkit.__main__:main"
 
 [tool.hatch.build]
 dev-mode-dirs = ["src"]
@@ -73,13 +88,22 @@ include = [
 [dependency-groups]
 test = [
     "pytest>=7.0",
+    "hypothesis",
+    "pytest-cov",
 ]
 lint = [
     "ruff>=0.1",
 ]
+typecheck = [
+    "mypy",
+    # scipy ships no inline types; without stubs mypy sees Any across every
+    # scipy call and --strict passes for the wrong reason.
+    "scipy-stubs",
+]
 dev = [
     { include-group = "test" },
     { include-group = "lint" },
+    { include-group = "typecheck" },
 ]
 
 [tool.ruff]
@@ -93,3 +117,4 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = "--strict-markers"
