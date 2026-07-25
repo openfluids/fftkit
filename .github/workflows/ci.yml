@@ -113,7 +113,12 @@ jobs:
         run: |
           # mkl-fft publishes to PyPI, so this needs neither the Intel index nor
           # permission to fail. Verified resolvable from pypi.org: mkl-fft 2.2.1.
-          uv pip install pyfftw mkl-fft
+          #
+          # tensorflow-cpu, not tensorflow: these runners have no GPU, and the
+          # default wheel drags in the whole CUDA stack for nothing. The backend
+          # still registers under the name "tensorflow" either way, which is why
+          # the gate below asks for that and not the package name.
+          uv pip install pyfftw mkl-fft tensorflow-cpu
           uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       # A hard gate, not a print. Without this the job can go green having
@@ -128,7 +133,7 @@ jobs:
           import sys
           import fftkit
 
-          required = {"scipy", "numpy", "mkl", "pyfftw", "torch"}
+          required = {"scipy", "numpy", "mkl", "pyfftw", "torch", "tensorflow"}
           available = set(fftkit.get_available_backends())
           print("available backends:", sorted(available))
           missing = sorted(required - available)
@@ -149,7 +154,7 @@ jobs:
       # tests for each one.
       - name: Confirm optional backends were exercised
         run: |
-          for b in mkl pyfftw torch; do
+          for b in mkl pyfftw torch tensorflow; do
             n=$(uv run --no-sync pytest -q -k "$b" --no-header 2>/dev/null | tail -1)
             echo "$b: $n"
           done

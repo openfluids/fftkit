@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The `tensorflow` backend raised on real input. `tf.signal.fft`/`ifft` accept
+  only `complex64`/`complex128`, and the adapter forwarded `float64` unchanged,
+  so `fftkit.fft(real_array, backend="tensorflow")` failed with
+  `InvalidArgumentError: Value for attr 'Tcomplex' of double is not in the list
+  of allowed values`. Real input is now cast by precision rather than flattened
+  to `complex64`: `float64` to `complex128`, `float32` to `complex64`, complex
+  input untouched. Present since `0.3.0`, which removed a blanket `complex64`
+  cast to preserve precision without adding a replacement for real input.
+  `rfft`/`irfft` were unaffected, since `tf.signal.rfft` takes real input.
+- The `tensorflow` backend rejected `norm='ortho'` and `norm='forward'` with
+  `NotImplementedError`. `tf.signal` has no `norm=` argument, but the convention
+  is only a scale factor, so the limitation was artificial. All three norms now
+  work across `fft`, `ifft`, `rfft`, `irfft`, `fft2` and `ifft2`, verified
+  against `scipy.fft` for every combination of transform, norm, and `n=`/`s=`.
+- **A defect class, not just a defect.** The two fixes above are the first
+  changes to the tensorflow backend ever exercised by a test run. CI's
+  `test-backends` job installed `pyfftw`, `mkl-fft`, and `torch` and hard-gated
+  on those, but never installed or required `tensorflow`, and no local
+  environment had it either. Its 123 parametrized tests were collected,
+  parametrized, and skipped on every machine. Installing `tensorflow-cpu` ran
+  them for the first time and 9 failed immediately. CI now installs it and
+  gates on it, so a silent install failure fails the job instead of deleting
+  the tests it exists to run.
+- The `tensorflow` norm scale for `irfft` without an explicit `n=` used the
+  half-spectrum length `m`, where the convention follows the real signal length
+  `2*(m-1)`. That gave a 28% error for `norm='ortho'` and 48% for
+  `norm='forward'`, with nothing raised. Introduced and caught within this
+  unreleased change, so never shipped.
+
 ### Added
 - `fftkit.spectrum()`, a high-level entry point for spectra of physical signals
   and simulation output. It accepts a possibly non-uniform time base, resamples

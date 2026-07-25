@@ -242,25 +242,66 @@ class TestTensorflowNGuard:
             _call("fft2", np.zeros((10, 12)), s=(4,), axes=(0, 1))
 
 
-class TestTensorflowNormGuard:
-    """tf.signal has no norm= keyword at all; anything other than the
-    implicit default ('backward', i.e. norm=None) must raise loudly rather
-    than silently compute the wrong normalization.
+class TestTensorflowNormalization:
+    """tf.signal has no norm= keyword, so the adapter applies the scale itself.
+
+    These assert the *exact* factor rather than merely that the call returns.
+    The stub's tf.signal is the identity, so whatever comes back is precisely
+    the scale the adapter chose -- which makes a wrong constant visible here
+    and nowhere else in the stub suite. Feeding zeros and asserting the result
+    is an ndarray would pass with the normalization entirely broken, since any
+    factor times zero is zero.
     """
 
-    @pytest.mark.parametrize("norm", ["ortho", "forward"])
-    def test_non_default_norm_raises_not_implemented(self, tf_stub, norm):
-        with pytest.raises(NotImplementedError, match="norm"):
-            _call("fft", np.zeros(16), norm=norm)
+    # N=16, so ortho divides by 4 and forward divides by 16.
+    @pytest.mark.parametrize(
+        "norm, expected_factor",
+        [(None, 1.0), ("backward", 1.0), ("ortho", 1.0 / 4.0), ("forward", 1.0 / 16.0)],
+    )
+    def test_forward_1d_scale_factor(self, tf_stub, norm, expected_factor):
+        x = np.ones(16)
+        result = _call("fft", x, norm=norm)
+        assert np.allclose(result, x * expected_factor)
 
-    @pytest.mark.parametrize("norm", [None, "backward"])
-    def test_default_norm_is_accepted(self, tf_stub, norm):
-        # Must not raise.
-        _call("fft", np.zeros(16), norm=norm)
+    @pytest.mark.parametrize(
+        "norm, expected_factor",
+        [(None, 1.0), ("backward", 1.0), ("ortho", 4.0), ("forward", 16.0)],
+    )
+    def test_inverse_1d_scale_factor(self, tf_stub, norm, expected_factor):
+        """tf.signal.ifft already contains 1/N, so ortho and forward multiply
+        on top of it rather than dividing."""
+        x = np.ones(16)
+        result = _call("ifft", x, norm=norm)
+        assert np.allclose(result, x * expected_factor)
 
-    def test_norm_guard_applies_to_2d_transforms_too(self, tf_stub):
-        with pytest.raises(NotImplementedError, match="norm"):
-            _call("fft2", np.zeros((4, 4)), norm="ortho")
+    @pytest.mark.parametrize(
+        "norm, expected_factor",
+        [("ortho", 1.0 / 4.0), ("forward", 1.0 / 16.0)],
+    )
+    def test_2d_scales_by_the_product_of_both_axes(self, tf_stub, norm, expected_factor):
+        """N for a 2-D transform is the product of the transformed lengths,
+        4*4=16 here -- not either axis alone, which would give 1/2 and 1/4."""
+        x = np.ones((4, 4))
+        result = _call("fft2", x, norm=norm)
+        assert np.allclose(result, x * expected_factor)
+
+    @pytest.mark.parametrize(
+        "norm, expected_factor",
+        [("ortho", 4.0), ("forward", 16.0)],
+    )
+    def test_irfft_without_n_normalizes_on_the_real_length(
+        self, tf_stub, norm, expected_factor
+    ):
+        """Regression test. irfft's input is a half-spectrum of m bins standing
+        for a real signal of length 2*(m-1), and the normalization follows the
+        real length. Here m=9, so N=16 and the factors are 4 and 16. Taking N=m
+        instead gave sqrt(9/16)=0.75 and 9/16=0.5625 -- errors of 28% and 48%
+        that raised nothing. Only the omitted-n case was affected, because an
+        explicit n= already carries the real length.
+        """
+        x = np.ones(9)
+        result = _call("irfft", x, norm=norm)
+        assert np.allclose(result, x * expected_factor)
 
 
 class TestTensorflowReturnsNumpy:

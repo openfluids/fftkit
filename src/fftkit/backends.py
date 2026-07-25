@@ -422,16 +422,62 @@ def _tensorflow_backend() -> Backend:
 
     tf.signal has no ``axis``/``norm`` keyword; it always transforms the
     innermost dimension(s). We move the requested axis(es) to the end,
-    transform, and move them back. ``norm`` other than the default
-    ('backward') is not supported by tf.signal and raises NotImplementedError.
+    transform, and move them back. Norm scaling ('ortho' and 'forward')
+    is implemented by post-multiplying the result.
     tf.signal has no general n-dimensional transform, so fftn/ifftn are
     intentionally left unimplemented.
     """
     name = "tensorflow"
 
-    def _check_norm(norm: str | None) -> None:
-        if norm not in (None, "backward"):
-            raise NotImplementedError(f"Backend '{name}' does not support norm={norm!r}.")
+    def _cast_to_complex(arr: NDArray[Any]) -> NDArray[Any]:
+        """Cast real input to complex while preserving precision.
+
+        float64 -> complex128, float32 -> complex64.
+        Complex types are left unchanged.
+        """
+        dtype = arr.dtype
+        if dtype == np.float64:
+            return arr.astype(np.complex128)
+        elif dtype == np.float32:
+            return arr.astype(np.complex64)
+        # Complex types pass through unchanged
+        return arr
+
+    def _get_norm_scale(norm: str | None, transform: str, logical_length: int) -> float | None:
+        """Compute the norm scaling factor to apply after TensorFlow's computation.
+
+        TensorFlow computes according to 'backward' norm (1/N applied in ifft).
+        This returns the additional scaling needed for 'ortho' or 'forward'.
+
+        Args:
+            norm: The requested norm ('backward', 'ortho', 'forward', or None).
+            transform: The transform name ('fft', 'ifft', 'rfft', 'irfft', 'fft2d', 'ifft2d').
+            logical_length: The length N (after n=/s= padding/truncation).
+
+        Returns:
+            The scaling factor to multiply the result by, or None if no scaling needed.
+        """
+        if norm is None or norm == 'backward':
+            return None
+
+        N = float(logical_length)
+        sqrt_N = np.sqrt(N)
+
+        # Forward transforms: fft, rfft, fft2d
+        if transform in ('fft', 'rfft', 'fft2d'):
+            if norm == 'ortho':
+                return float(1.0 / sqrt_N)
+            elif norm == 'forward':
+                return 1.0 / N
+        # Inverse transforms: ifft, irfft, ifft2d
+        # Note: TensorFlow's ifft already includes 1/N, so we multiply on top
+        elif transform in ('ifft', 'irfft', 'ifft2d'):
+            if norm == 'ortho':
+                return float(sqrt_N)
+            elif norm == 'forward':
+                return N
+
+        return None
 
     def _make_1d(tf_name: str) -> TransformFunc:
         def fn(
@@ -444,8 +490,13 @@ def _tensorflow_backend() -> Backend:
             # op-level parallelism is controlled process-wide, not per FFT --
             # so `workers` is accepted for signature compatibility and ignored.
             del workers
-            _check_norm(norm)
             x_arr = np.asarray(x)
+
+            # Cast real input to complex (tf.signal.fft/ifft only accept complex types)
+            # rfft/irfft accept real input natively, so skip for those.
+            if tf_name in ('fft', 'ifft'):
+                x_arr = _cast_to_complex(x_arr)
+
             # tf.signal.fft/ifft take no fft_length, so n= has to be applied by
             # resizing the input first -- which is exactly what numpy's n= means
             # for a forward transform: truncate to n, or zero-pad up to n.
@@ -456,17 +507,40 @@ def _tensorflow_backend() -> Backend:
             # fft_length directly, so that path stays as-is. irfft's n= is an
             # OUTPUT length, which only fft_length can express -- resizing its
             # input would mean something different.
+
+            # Determine the logical length N that the norm scaling divides by.
+            # For every transform except irfft that is the length along the
+            # transformed axis. irfft is the exception: its input is a
+            # half-spectrum of m bins describing a real signal of length
+            # 2*(m-1), and the normalization constant follows the real signal,
+            # not the half-spectrum. Using m here scales `ortho` by
+            # sqrt(m/N) and `forward` by m/N -- a 28% and 48% error
+            # respectively at m=33, silently wrong rather than raising.
+            logical_length = x_arr.shape[axis]
+            if tf_name == "irfft" and n is None:
+                logical_length = 2 * (x_arr.shape[axis] - 1)
             if n is not None and tf_name in ("fft", "ifft"):
                 x_arr = _resize_axis(x_arr, n, axis)
+                logical_length = n
+
             x_tf = tf.convert_to_tensor(x_arr)
             x_tf = tf.experimental.numpy.moveaxis(x_tf, axis, -1)
             func = getattr(tf.signal, tf_name)
+
             if n is not None and tf_name in ("rfft", "irfft"):
                 result = func(x_tf, fft_length=[n])
+                logical_length = n
             else:
                 result = func(x_tf)
+
             result = tf.experimental.numpy.moveaxis(result, -1, axis)
             arr: ArrayResult = result.numpy()
+
+            # Apply norm scaling if needed
+            scale = _get_norm_scale(norm, tf_name, logical_length)
+            if scale is not None:
+                arr = arr * scale
+
             return arr
 
         return fn
@@ -480,13 +554,19 @@ def _tensorflow_backend() -> Backend:
 
             # See _make_1d: no per-call thread-count equivalent, ignored.
             del workers
-            _check_norm(norm)
             resolved_axes = (-2, -1) if axes is None else tuple(axes)
             x_arr = np.asarray(x)
+
+            # For fft2d/ifft2d (which work on 2-D complex input),
+            # cast real input to complex. Note: we're here for fft2/ifft2,
+            # not for rfft2/irfft2 (which don't exist in the registered matrix).
+            x_arr = _cast_to_complex(x_arr)
+
             # Same defect as the 1-D path: fft2d/ifft2d take no fft_length, and
             # the registry only ever maps fft2/ifft2 onto them, so the old
             # `fft_length=s` branch was dead code and s= was silently discarded.
             # Apply it by resizing each transformed axis, matching numpy's s=.
+            logical_lengths = list(x_arr.shape[ax] for ax in resolved_axes)
             if s is not None:
                 if len(s) != len(resolved_axes):
                     raise ValueError(
@@ -495,12 +575,22 @@ def _tensorflow_backend() -> Backend:
                     )
                 for length, ax in zip(s, resolved_axes):
                     x_arr = _resize_axis(x_arr, length, ax)
+                logical_lengths = list(s)
+
             x_tf = tf.convert_to_tensor(x_arr)
             x_tf = tf.experimental.numpy.moveaxis(x_tf, resolved_axes, (-2, -1))
             func = getattr(tf.signal, tf_name)
             result = func(x_tf)
             result = tf.experimental.numpy.moveaxis(result, (-2, -1), resolved_axes)
             arr: ArrayResult = result.numpy()
+
+            # Apply norm scaling if needed
+            # For 2-D transforms, N = product of the two transformed axis lengths
+            logical_length = int(np.prod(logical_lengths))
+            scale = _get_norm_scale(norm, tf_name, logical_length)
+            if scale is not None:
+                arr = arr * scale
+
             return arr
 
         return fn
