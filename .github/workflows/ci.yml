@@ -120,9 +120,11 @@ jobs:
       # installed nothing: the backend parametrization skips what is missing,
       # so a silent install failure removes exactly the tests this job exists
       # to run and still reports success.
+      # --no-sync for the same reason as test-minversion: these backends are
+      # installed outside uv.lock, and a re-sync could drop them.
       - name: Require the backends this job exists to exercise
         run: |
-          uv run python - <<'PY'
+          uv run --no-sync python - <<'PY'
           import sys
           import fftkit
 
@@ -140,7 +142,7 @@ jobs:
           PY
 
       - name: Run tests
-        run: uv run pytest -v
+        run: uv run --no-sync pytest -v
 
       # Prove the agreement tests actually ran against the optional backends
       # rather than being skipped, by counting non-skipped backend-parametrized
@@ -148,7 +150,7 @@ jobs:
       - name: Confirm optional backends were exercised
         run: |
           for b in mkl pyfftw torch; do
-            n=$(uv run pytest -q -k "$b" --no-header 2>/dev/null | tail -1)
+            n=$(uv run --no-sync pytest -q -k "$b" --no-header 2>/dev/null | tail -1)
             echo "$b: $n"
           done
         shell: bash
@@ -179,11 +181,38 @@ jobs:
       - name: Pin the declared dependency floors
         run: uv pip install "numpy==1.24.*" "scipy==1.10.*"
 
-      - name: Show versions under test
-        run: uv run python -c "import numpy, scipy; print('numpy', numpy.__version__, 'scipy', scipy.__version__)"
+      # --no-sync on every uv run below is load-bearing. `uv run` re-syncs the
+      # environment to uv.lock before executing, which silently reverts the
+      # downgrade above: this job once reported numpy 2.4.6 / scipy 1.17.1 while
+      # its step names claimed to be testing 1.24 / 1.10, and passed.
+      #
+      # Asserted rather than printed for the same reason. A job that prints the
+      # versions it tested is only as good as whoever reads the log; if the pin
+      # stops working, this must fail rather than quietly test something else.
+      - name: Assert the floors are actually installed
+        run: |
+          uv run --no-sync python - <<'PY'
+          import sys
+          import numpy, scipy
+
+          expected = {"numpy": "1.24", "scipy": "1.10"}
+          actual = {"numpy": numpy.__version__, "scipy": scipy.__version__}
+          print("versions under test:", actual)
+          wrong = {
+              name: got for name, got in actual.items()
+              if not got.startswith(expected[name] + ".")
+          }
+          if wrong:
+              sys.exit(
+                  f"FAIL: this job exists to test the floors declared in "
+                  f"pyproject.toml, but got {wrong} instead of {expected}.\n"
+                  "Most likely a `uv run` without --no-sync re-synced the "
+                  "environment back to uv.lock."
+              )
+          PY
 
       - name: Run tests
-        run: uv run pytest -v
+        run: uv run --no-sync pytest -v
 
   # The matrix above syncs from uv.lock, which is the right default for
   # reproducibility but means CI stops seeing a brand-new numpy or scipy the day
