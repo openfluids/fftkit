@@ -189,7 +189,11 @@ def _interpolator(name: str, t: NDArray[np.float64], x: NDArray[np.float64]) -> 
     if name == "cubic":
         return CubicSpline(t, x)
     if name == "akima":
-        return Akima1DInterpolator(t, x, method="akima")
+        # No method="akima" here, even though that is the interpolant meant. The
+        # keyword only exists from scipy 1.13, this package declares scipy>=1.10,
+        # and "akima" is already the default -- passing it explicitly is
+        # bit-identical output in exchange for a TypeError on the declared floor.
+        return Akima1DInterpolator(t, x)
     if name == "pchip":
         return PchipInterpolator(t, x)
     if name == "nearest":
