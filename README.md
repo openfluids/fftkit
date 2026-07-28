@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/openfluids/fftkit/actions/workflows/ci.yml/badge.svg)](https://github.com/openfluids/fftkit/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/fftkit.svg)](https://pypi.org/project/fftkit/)
+[![Python](https://img.shields.io/pypi/pyversions/fftkit.svg)](https://pypi.org/project/fftkit/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 `fftkit` serves two purposes. `spectrum()` takes a time series from a simulation
