@@ -13,6 +13,10 @@ on:
 # lists were wrong and every test job failed at collection. Declaring the
 # dependency once and syncing it is what prevents that class of failure.
 
+# Read-only token: nothing here pushes, comments or publishes.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-24.04
