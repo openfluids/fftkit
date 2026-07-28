@@ -36,6 +36,8 @@ benchmarks/out/
 *.png
 *.pdf
 !docs/**/*.png
+# The README banner is a tracked project asset, not a regenerable artifact.
+!assets/*.png
 
 # Data
 *.npz

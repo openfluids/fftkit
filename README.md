@@ -1,4 +1,4 @@
-# fftkit
+![fftkit banner](https://raw.githubusercontent.com/openfluids/fftkit/main/assets/readme-banner-v1.png)
 
 [![CI](https://github.com/openfluids/fftkit/actions/workflows/ci.yml/badge.svg)](https://github.com/openfluids/fftkit/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/fftkit.svg)](https://pypi.org/project/fftkit/)
@@ -45,17 +45,27 @@ publish. Nothing raises an error.
 reports exactly what it did.
 
 ```python
+import numpy as np
 import fftkit
+
+rng = np.random.default_rng(0)
+fs, n = 1000.0, 8192
+dt = (1 / fs) * (1 + 0.25 * rng.uniform(-1, 1, n))   # a CFL-limited time step
+t = np.cumsum(dt) - dt[0]
+x = (
+    np.sin(2 * np.pi * 50 * t) + 0.3 * np.sin(2 * np.pi * 120 * t)
+    + 0.05 * rng.standard_normal(n) + 0.002 * t      # noise, and a slow drift
+)
 
 result = fftkit.spectrum(x, t=t)     # t may be non-uniform
 print(result.summary())
 ```
 
 ```
-PSD via periodogram: 4117 bins, 0 to 503.256 Hz at fs=1006.51 Hz
+PSD via periodogram: 4117 bins, 0 to 502.994 Hz at fs=1005.99 Hz
   window=hann  detrend=linear
-  integrated power 0.504843 = 1.000 x variance
-  trust up to 357.15 Hz
+  integrated power 0.545659 = 1.000 x variance
+  trust up to 400.001 Hz
   resampled: cubic, 8232 points (fast length)
 ```
 
@@ -68,12 +78,18 @@ Each default, and the reason for it:
 
 | Step | Default | Reason |
 |---|---|---|
-| Resample to uniform | cubic spline | Measured 219x lower band-power error than linear interpolation on a jittered record. Linear interpolation acts as a low-pass filter with a sinc² response, attenuating the high-frequency end of the spectrum you are measuring. Its extra cost is negligible next to generating the data. |
+| Resample to uniform | cubic spline | 23x lower band-power error than linear interpolation, on a record of three tones sampled with 30% jitter. Linear interpolation acts as a low-pass filter with a sinc² response, attenuating the high-frequency end of the spectrum you are measuring. Its extra cost is negligible next to generating the data. |
 | Grid length | already FFT-friendly | The grid spacing is free to choose, so landing on a fast length costs nothing and no zero-padding is ever needed. |
-| Anti-alias | on when downsampling | Without it, energy above the new Nyquist folds back into the band. Measured on a 400 Hz tone resampled into a 200 Hz band: 0.000 spurious power with the filter, 0.355 without it. |
+| Anti-alias | on when downsampling | Without it, energy above the new Nyquist folds back into the band. Measured on a 400 Hz tone resampled from 1000 Hz to 400 Hz: 0.000 in-band power with the filter, 0.064 without it. The tone sits above the new Nyquist, so it should have vanished entirely; instead an eighth of its power reappears at a frequency it never occupied. |
 | Detrend | `linear` | A mean offset lands entirely in the zero-frequency bin; a drift smears power across the lowest frequencies. |
 | Window | `hann` | A record boundary is a discontinuity, and its leakage spreads across decades of a log-log plot. |
 | Scaling | density | `np.sum(psd) * df` equals the variance, so integrating a band gives that band's energy. |
+
+Every measured number in this section is re-derived by
+`benchmarks/verify_readme_claims.py`, which prints each claim next to what the
+current build actually produces. The figures depend on the test conditions — how
+much jitter, which tones, which seed — so run it rather than trusting the
+values here if you are relying on one.
 
 ### It chooses the estimator from the signal
 
@@ -93,15 +109,15 @@ Measured on synthetic signals at fs = 1000 Hz, N = 8192:
 |---|---|---|
 | Single 50 Hz tone | 1.000 | periodogram |
 | Three modes (50/120/213 Hz) | 1.000 | periodogram |
-| Tone + 50% noise | 0.680 | periodogram |
-| Turbulence + shedding tone | 0.959 | periodogram |
-| Turbulence, f^-5/3 | 0.000 | blackman_tukey |
+| Tone + 50% noise | 0.667 | periodogram |
+| Turbulence + shedding tone | 0.999 | periodogram |
+| Turbulence, f^-5/3 | 0.001 | blackman_tukey |
 | Steeper broadband, f^-3 | 0.000 | blackman_tukey |
-| White noise | 0.005 | blackman_tukey |
+| White noise | 0.008 | blackman_tukey |
 
 A coherent signal carries no random scatter for averaging to reduce, so
 segmenting the record only costs resolution and blunts the peak being measured.
-On a single tone, Welch lowers the peak from 2.215 to 0.324. A turbulent signal
+On a single tone, Welch lowers the peak from 2.344 to 0.324. A turbulent signal
 is one realisation of a random process, where a raw periodogram carries about
 100% standard error per bin however long the record; there, smoothing is the only
 remedy.
@@ -116,8 +132,8 @@ variance by the same amount while retaining the whole record:
 
 | Estimator | f^-5/3 | f^-3 | Effective resolution |
 |---|---|---|---|
-| periodogram | 1.02 | 1.00 | 0.122 Hz |
-| Welch, `nperseg=N/8` | 0.27 | 0.04 | 0.977 Hz |
+| periodogram | 1.00 | 1.00 | 0.122 Hz |
+| Welch, `nperseg=N/8` | 0.38 | 0.05 | 0.977 Hz |
 | Blackman–Tukey, `nlags=N/8` | 1.00 | 1.00 | 0.977 Hz |
 
 Numbers are the fraction of signal variance recovered by integrating the
@@ -156,13 +172,13 @@ print(report.summary())
 ```
 
 ```
-8192 samples over 8.17774 s, non-uniform (jitter 23.2%)
-  dt: min 0.000600018  median 0.000997957  max 0.00139997
-  frequency range: 0.122283 Hz (1/T) to 357.15 Hz (defensible)
-  nominal Nyquist from median dt: 501.024 Hz
+8192 samples over 8.18201 s, non-uniform (jitter 14.5%)
+  dt: min 0.000750054  median 0.000998286  max 0.00125
+  frequency range: 0.122219 Hz (1/T) to 400.001 Hz (defensible)
+  nominal Nyquist from median dt: 500.859 Hz
 ```
 
-The band between 357 Hz and the 501 Hz you would get from the median interval is
+The band between 400 Hz and the 501 Hz you would get from the median interval is
 interpolation, not measurement. `spectrum()` carries the same figure as
 `result.f_max_defensible`.
 
@@ -212,7 +228,7 @@ Trust that over any number in this README.
 $ fftkit info
 === fftkit info ===
 
-fftkit version : 0.2.0
+fftkit version : 0.4.0
 Python version : 3.13.13
 numpy version  : 2.5.1
 scipy version  : 1.18.0
@@ -228,7 +244,7 @@ Backends:
   pyfftw      yes        fft, ifft, rfft, irfft, fft2, ifft2, fftn, ifftn
   cupy        no         not installed / no CUDA GPU
   torch       no         not installed (pip install torch)
-  tensorflow  no         not installed (pip install tensorflow)
+  tensorflow  yes        fft, ifft, rfft, irfft, fft2, ifft2
   accelerate  no         macOS only
 
 GPU:
@@ -240,16 +256,19 @@ $ fftkit bench --size 65536 --iters 30
 === fftkit bench (size=65536, iterations=30) ===
 Speedup is relative to the slowest backend in this run.
 
-  backend   time (ms)   speedup
-  mkl         0.6994    10.37x
-  pyfftw      2.8862     2.51x
-  numpy       6.3910     1.13x
-  scipy       7.2527     1.00x
+  backend      time (ms)   speedup
+  mkl             0.1252     7.45x
+  pyfftw          0.3381     2.76x
+  numpy           0.6017     1.55x
+  scipy           0.8165     1.14x
+  tensorflow      0.9331     1.00x
 ```
 
-Timings move by a few percent between runs, so this block and the table
-further down come from two different invocations and do not match to the
-last digit.
+Timings are not stable to the last digit. On a shared or virtualised machine a
+single invocation of this command varies by half again between runs, and an
+unlucky first run can be several times slower while threads spin up. The table
+further down is a best-of-nine to suppress that; this block is one ordinary
+invocation, so the two do not match.
 
 `--json` emits machine-readable output instead of the table, and `--gpu`
 switches to a CPU-vs-GPU comparison sweep.
@@ -353,9 +372,16 @@ honoured too, for existing modalpy users).
 ### Working on fftkit
 
 ```bash
-uv sync --group dev                  # tests, linter, type checker
-uv sync --group dev --group backends # + pyfftw, mkl_fft, tensorflow-cpu
+uv sync --group dev                              # tests, linter, type checker
+uv sync --group dev --group backends             # + pyfftw, mkl_fft, tensorflow-cpu
+uv sync --group dev --group backends --extra bench   # + matplotlib, tabulate
 ```
+
+`benchmarks/` holds the scripts behind the numbers in this README.
+`verify_readme_claims.py` re-derives every measured claim in the spectral
+sections and prints it next to the README's wording, so a claim that drifts
+shows up as a disagreement rather than going unnoticed. `bench_backends.py`
+sweeps the backend timings across many transform lengths.
 
 The `backends` group matters more than it looks. Cross-backend agreement tests
 are parametrized over every registered backend and skip the ones that are absent,
@@ -365,31 +391,52 @@ want that backend covered locally.
 
 ## Measured numbers
 
-Machine: `nexus-dev`, AMD Ryzen 9 9900X (12-core), Linux, Python 3.13.13,
-numpy 2.5.1, scipy 1.18.0, mkl-fft 2.2.1, pyfftw 0.15.1. This machine has
-no GPU, so the table covers CPU backends only and says nothing either way
-about GPU performance.
+Measured 2026-07-28. Machine: `nexus-dev`, a Linux VM with 18 vCPUs on an
+AMD Ryzen 9 9900X host, Python 3.13.13, numpy 2.5.1, scipy 1.18.0,
+mkl-fft 2.2.1, pyfftw 0.15.1, tensorflow-cpu 2.21.0. There is no GPU, so the
+table covers CPU backends only and says nothing either way about GPU
+performance.
 
-`fftkit bench`, ms per FFT, 30 iterations, lower is better:
+`fftkit bench`, ms per FFT, complex 1-D forward transform, lower is better.
+Each entry is the best of nine invocations of 50 iterations. Best-of-N rather
+than the mean, because contention only ever adds time: on a shared machine the
+minimum is the closest estimate of what the transform actually costs.
 
-| N | mkl | pyfftw | scipy | numpy |
-|---|---|---|---|---|
-| 1024 | 0.0548 | 0.2161 | 0.1607 | 0.1770 |
-| 65536 | 0.6944 | 2.8463 | 7.5495 | 6.2320 |
-| 262144 | 2.1393 | 11.2381 | 23.5816 | 26.4207 |
+| N | mkl | pyfftw | scipy | numpy | tensorflow |
+|---|---|---|---|---|---|
+| 1024 | 0.0032 | 0.0061 | 0.0057 | 0.0064 | 0.0879 |
+| 65536 | 0.1815 | 0.3375 | 0.7838 | 0.5941 | 0.8776 |
+| 262144 | 0.3753 | 1.0017 | 2.3958 | 2.6466 | 2.3480 |
 
-MKL wins at every size here: 10.9x over the slowest backend at 64K points
-and 12.4x at 256K. pyfftw is second at large N but the slowest option at
-N=1024, where per-call planning/dispatch overhead dominates a transform
-that small.
+MKL wins at every size. Its margin over the *fastest alternative* — the number
+that should drive the decision — is 1.8x at N=1024, 1.9x at 65536, and 2.7x at
+262144. Quoting a margin over the slowest backend instead would read as 27x at
+N=1024, which says more about TensorFlow's per-call overhead than about MKL.
 
-Specific to this CPU and this library stack. Run `fftkit bench` on your own
-hardware before picking a backend.
+pyfftw is second at large N. At N=1024 the three non-MKL CPU backends land
+within 12% of each other, which is inside this machine's run-to-run scatter:
+at that size you are measuring dispatch overhead, not the transform, so their
+ordering there should not be read as meaningful.
 
-Test suite: 695 tests. 277 pass with only scipy and numpy available; 389 pass
-once mkl and pyfftw are installed. Adding those two backends activates 112
-tests that are otherwise skipped, because most of the suite is parametrized
-over every registered backend rather than only the installed ones.
+Specific to this CPU and this library stack, and to a virtualised host that
+other work shares. Run `fftkit bench` on your own hardware before picking a
+backend.
+
+Test suite: 1426 tests with every CPU backend installed. How many actually run
+depends on what is present:
+
+| Installed | Pass | Skip |
+|---|---|---|
+| scipy + numpy only | 620 | 773 |
+| + mkl, pyfftw | 854 | 539 |
+| + tensorflow-cpu | 989 | 437 |
+
+Adding mkl and pyfftw activates 234 tests; adding tensorflow another 135. Most
+of the suite is parametrized over every registered backend rather than only the
+installed ones, so a missing backend silently removes its tests instead of
+failing them. That is the failure mode the `backends` dependency group exists to
+prevent — the tensorflow adapter shipped a defect in 0.3.0 precisely because its
+tests ran nowhere.
 
 ## Spectral helpers
 
@@ -409,8 +456,10 @@ np.sum(psd) * (freqs[1] - freqs[0]) / np.var(x)   # 1.0
 
 Use `sum(psd) * df` rather than `np.trapezoid`: the trapezoidal rule
 half-weights the first and last bins, but DC and Nyquist are full bins in the
-underlying discrete sum, so trapezoid is biased low (0.9996 at N=64 where the
-sum is exact).
+underlying discrete sum, so trapezoid is biased low. On white noise the sum is
+exact to every digit at any length, while trapezoid returns 0.9986 at N=64 and
+0.9991 at N=256 — the bias is one bin's worth, so it shrinks as N grows and
+never quite vanishes.
 
 `calculate_error` compares a detected peak set against known frequencies. Its
 default only measures true-to-detected distance, which makes spurious
@@ -449,7 +498,10 @@ fftkit.fft(x_1d)            # silent: identical either way
 warnings.filterwarnings("ignore", category=fftkit.AxisDefaultWarning)
 ```
 
-The warning goes away in `0.3.0`.
+This warning was originally slated for removal in `0.3.0`. It is still here, and
+now deliberately so: a 0.1.x caller who passes a 2-D array without an explicit
+`axis` gets silently different numbers, and this is the only thing that tells
+them. It has no removal date.
 
 ## License
 

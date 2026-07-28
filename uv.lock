@@ -498,7 +498,7 @@ wheels = [
 
 [[package]]
 name = "fftkit"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -511,6 +511,7 @@ dependencies = [
 all = [
     { name = "mkl-fft" },
     { name = "pyfftw" },
+    { name = "tensorflow" },
     { name = "torch" },
 ]
 bench = [
@@ -581,6 +582,7 @@ requires-dist = [
     { name = "pyfftw", marker = "extra == 'pyfftw'" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "tabulate", marker = "extra == 'bench'", specifier = ">=0.9" },
+    { name = "tensorflow", marker = "extra == 'all'" },
     { name = "tensorflow", marker = "extra == 'tensorflow'" },
     { name = "torch", marker = "extra == 'all'" },
     { name = "torch", marker = "extra == 'torch'" },
