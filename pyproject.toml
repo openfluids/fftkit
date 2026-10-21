@@ -172,3 +172,6 @@ exclude_also = [
     # to assert print() output, which tests the shell, not the library.
     "if __name__ == .__main__.:",
 ]
+
+[tool.uv]
+exclude-newer = "7 days"
