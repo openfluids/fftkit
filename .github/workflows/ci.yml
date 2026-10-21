@@ -124,7 +124,9 @@ jobs:
           # stack, gigabytes of it, for a runner with no GPU. Only PyTorch's own
           # index publishes a CPU-only build, and a per-package index URL cannot
           # be expressed in a dependency group.
-          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # --no-config: PyTorch's index publishes no upload dates, so the
+          # 7-day exclude-newer rule in pyproject.toml rejects every file there.
+          uv pip install --no-config torch --index-url https://download.pytorch.org/whl/cpu
 
       # A hard gate, not a print. Without this the job can go green having
       # installed nothing: the backend parametrization skips what is missing,
