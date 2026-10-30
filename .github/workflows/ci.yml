@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 # Dependency lists live in pyproject.toml's [dependency-groups] and are
 # installed here with `uv sync`. They used to be spelled out per job as
