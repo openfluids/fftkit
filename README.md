@@ -391,7 +391,7 @@ want that backend covered locally.
 
 ## Measured numbers
 
-Measured 2026-07-28. Machine: `nexus-dev`, a Linux VM with 18 vCPUs on an
+Measured 2026-07-28. Machine: a Linux VM with 18 vCPUs on an
 AMD Ryzen 9 9900X host, Python 3.13.13, numpy 2.5.1, scipy 1.18.0,
 mkl-fft 2.2.1, pyfftw 0.15.1, tensorflow-cpu 2.21.0. There is no GPU, so the
 table covers CPU backends only and says nothing either way about GPU
